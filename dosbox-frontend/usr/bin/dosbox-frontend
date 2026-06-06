@@ -1,0 +1,902 @@
+#!/usr/bin/env python3
+"""
+DOSBox Frontend – GTK3 floppy-image manager for DOSBox
+"""
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+import os, sys, json, subprocess, shutil, struct
+from pathlib import Path
+from datetime import datetime
+
+APP_NAME    = "dosbox-frontend"
+APP_VERSION = "1.0.0"
+CONFIG_DIR  = Path.home() / ".config" / "dosbox-frontend"
+CONFIG_FILE = CONFIG_DIR / "settings.json"
+FLOPPY_EXTS = {".img", ".ima", ".vfd", ".flp"}
+
+# ── Default settings ──────────────────────────────────────────────────────────
+DEFAULT_SETTINGS = {
+    "dosbox_exe":    "",
+    "dosbox_config": "",
+    "library_folder": str(Path.home()),
+    "cycles":        "auto",
+    "memory_mb":     "8",
+    "fullscreen":    False,
+    "recent":        [],   # list of paths, newest first
+    "images":        [],   # list of {path, last_used}
+}
+
+
+def load_settings():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE) as f:
+                data = json.load(f)
+            s = dict(DEFAULT_SETTINGS)
+            s.update(data)
+            return s
+        except Exception:
+            pass
+    return dict(DEFAULT_SETTINGS)
+
+
+def save_settings(s):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(s, f, indent=2)
+
+
+# ── Create blank floppy image ─────────────────────────────────────────────────
+def create_blank_floppy(path: str, size_bytes: int):
+    buf = bytearray(size_bytes)
+    if size_bytes == 1_474_560:
+        # Minimal FAT12 BPB for 1.44 MB
+        buf[0:3]   = b"\xeb\x3c\x90"
+        buf[3:11]  = b"MSDOS5.0"
+        struct.pack_into("<H", buf, 11, 512)   # bytes per sector
+        buf[13]    = 1                          # sectors per cluster
+        struct.pack_into("<H", buf, 14, 1)     # reserved sectors
+        buf[16]    = 2                          # FATs
+        struct.pack_into("<H", buf, 17, 224)   # root entries
+        struct.pack_into("<H", buf, 19, 2880)  # total sectors
+        buf[21]    = 0xF0                       # media descriptor
+        struct.pack_into("<H", buf, 22, 9)     # sectors per FAT
+        struct.pack_into("<H", buf, 24, 18)    # sectors per track
+        struct.pack_into("<H", buf, 26, 2)     # heads
+        buf[510]   = 0x55
+        buf[511]   = 0xAA
+        # FAT1
+        buf[512]   = 0xF0; buf[513] = 0xFF; buf[514] = 0xFF
+        # FAT2
+        off = 512 + 9 * 512
+        buf[off]   = 0xF0; buf[off+1] = 0xFF; buf[off+2] = 0xFF
+    with open(path, "wb") as f:
+        f.write(buf)
+
+
+# ── Create Image Dialog ───────────────────────────────────────────────────────
+class CreateImageDialog(Gtk.Dialog):
+    SIZES = [
+        ("1.44 MB  (1,474,560 bytes)", 1_474_560),
+        ("1.2 MB   (1,228,800 bytes)", 1_228_800),
+        ("720 KB   (737,280 bytes)",     737_280),
+        ("360 KB   (368,640 bytes)",     368_640),
+    ]
+
+    def __init__(self, parent, library_folder):
+        super().__init__(title="Create Blank Floppy Image", transient_for=parent,
+                         flags=0)
+        self.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                         "Create", Gtk.ResponseType.OK)
+        self.set_default_size(460, 160)
+        self.set_resizable(False)
+
+        box = self.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_top(12); box.set_margin_bottom(12)
+        box.set_margin_start(12); box.set_margin_end(12)
+
+        # Size row
+        row1 = Gtk.Box(spacing=8)
+        row1.pack_start(Gtk.Label(label="Floppy Size:"), False, False, 0)
+        self._size_combo = Gtk.ComboBoxText()
+        for label, _ in self.SIZES:
+            self._size_combo.append_text(label)
+        self._size_combo.set_active(0)
+        row1.pack_start(self._size_combo, True, True, 0)
+        box.pack_start(row1, False, False, 0)
+
+        # Path row
+        row2 = Gtk.Box(spacing=8)
+        row2.pack_start(Gtk.Label(label="Save As:"), False, False, 0)
+        self._path_entry = Gtk.Entry()
+        self._path_entry.set_placeholder_text("Choose output file…")
+        self._path_entry.set_hexpand(True)
+        row2.pack_start(self._path_entry, True, True, 0)
+        btn = Gtk.Button(label="Browse…")
+        btn.connect("clicked", self._on_browse, library_folder)
+        row2.pack_start(btn, False, False, 0)
+        box.pack_start(row2, False, False, 0)
+
+        self.show_all()
+
+    def _on_browse(self, _btn, library_folder):
+        dlg = Gtk.FileChooserDialog(title="Save Floppy Image As",
+                                    parent=self,
+                                    action=Gtk.FileChooserAction.SAVE)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_SAVE,   Gtk.ResponseType.OK)
+        dlg.set_current_folder(library_folder)
+        dlg.set_current_name("floppy.img")
+        dlg.set_do_overwrite_confirmation(True)
+        if dlg.run() == Gtk.ResponseType.OK:
+            self._path_entry.set_text(dlg.get_filename())
+        dlg.destroy()
+
+    @property
+    def output_path(self):
+        return self._path_entry.get_text().strip()
+
+    @property
+    def size_bytes(self):
+        idx = self._size_combo.get_active()
+        return self.SIZES[idx][1] if idx >= 0 else 1_474_560
+
+
+# ── Main Window ───────────────────────────────────────────────────────────────
+class MainWindow(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="💾 DOSBox Frontend")
+        self.set_default_size(900, 580)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.connect("destroy", self._on_destroy)
+        self.connect("delete-event", self._on_delete)
+
+        self._settings   = load_settings()
+        self._mounted_a  = ""
+        self._mounted_b  = ""
+        self._dosbox_pid = None
+
+        # Enable drag-and-drop on the whole window
+        self.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY)
+        self.drag_dest_add_uri_targets()
+        self.connect("drag-data-received", self._on_drag_data)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add(vbox)
+
+        notebook = Gtk.Notebook()
+        notebook.set_tab_pos(Gtk.PositionType.TOP)
+        vbox.pack_start(notebook, True, True, 0)
+
+        notebook.append_page(self._build_launch_tab(),   Gtk.Label(label="▶  Launch"))
+        notebook.append_page(self._build_floppy_tab(),   Gtk.Label(label="💾  Floppy Images"))
+        notebook.append_page(self._build_settings_tab(), Gtk.Label(label="⚙  Settings"))
+        notebook.append_page(self._build_about_tab(),    Gtk.Label(label="ℹ  About"))
+
+        # Status bar
+        self._statusbar = Gtk.Statusbar()
+        self._status_ctx = self._statusbar.get_context_id("main")
+        vbox.pack_start(self._statusbar, False, False, 0)
+
+        self._refresh_all()
+        GLib.timeout_add(2000, self._poll_dosbox)
+        self.show_all()
+
+    # ── Launch Tab ────────────────────────────────────────────────────────────
+    def _build_launch_tab(self):
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        outer.set_margin_top(16); outer.set_margin_bottom(16)
+        outer.set_margin_start(16); outer.set_margin_end(16)
+
+        # Big launch buttons
+        btn_row = Gtk.Box(spacing=12)
+        self._btn_launch = Gtk.Button(label="▶  Launch DOSBox")
+        self._btn_launch.get_style_context().add_class("suggested-action")
+        self._btn_launch.set_size_request(-1, 60)
+        self._btn_launch.connect("clicked", self._on_launch_dosbox)
+        btn_row.pack_start(self._btn_launch, True, True, 0)
+
+        btn_quick = Gtk.Button(label="💾  Quick Launch with Floppy…")
+        btn_quick.set_size_request(-1, 60)
+        btn_quick.connect("clicked", self._on_quick_launch)
+        btn_row.pack_start(btn_quick, True, True, 0)
+        outer.pack_start(btn_row, False, False, 0)
+
+        # Recent floppy
+        frame = Gtk.Frame(label="  💾  Recent Floppy Images  ")
+        frame.set_shadow_type(Gtk.ShadowType.ETCHED_IN)
+        rbox = Gtk.Box(spacing=8)
+        rbox.set_margin_top(8); rbox.set_margin_bottom(8)
+        rbox.set_margin_start(8); rbox.set_margin_end(8)
+
+        self._recent_combo = Gtk.ComboBoxText()
+        self._recent_combo.set_hexpand(True)
+        rbox.pack_start(self._recent_combo, True, True, 0)
+
+        btn_launch_recent = Gtk.Button(label="▶  Launch")
+        btn_launch_recent.connect("clicked", self._on_launch_recent)
+        rbox.pack_start(btn_launch_recent, False, False, 0)
+        frame.add(rbox)
+        outer.pack_start(frame, False, False, 0)
+
+        # DOSBox path
+        frame2 = Gtk.Frame(label="  ⚙  DOSBox Executable  ")
+        frame2.set_shadow_type(Gtk.ShadowType.ETCHED_IN)
+        pbox = Gtk.Box(spacing=8)
+        pbox.set_margin_top(8); pbox.set_margin_bottom(8)
+        pbox.set_margin_start(8); pbox.set_margin_end(8)
+
+        self._launch_exe_entry = Gtk.Entry()
+        self._launch_exe_entry.set_hexpand(True)
+        self._launch_exe_entry.set_placeholder_text("Path to dosbox executable…")
+        self._launch_exe_entry.connect("changed", self._on_launch_exe_changed)
+        pbox.pack_start(self._launch_exe_entry, True, True, 0)
+
+        btn_browse_exe = Gtk.Button(label="📂  Browse…")
+        btn_browse_exe.connect("clicked", self._on_browse_dosbox_exe)
+        pbox.pack_start(btn_browse_exe, False, False, 0)
+        frame2.add(pbox)
+        outer.pack_start(frame2, False, False, 0)
+
+        # Status label
+        self._launch_status_lbl = Gtk.Label(label="DOSBox: Not Running")
+        self._launch_status_lbl.set_halign(Gtk.Align.START)
+        outer.pack_start(self._launch_status_lbl, False, False, 0)
+
+        return outer
+
+    # ── Floppy Tab ────────────────────────────────────────────────────────────
+    def _build_floppy_tab(self):
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        paned.set_position(620)
+
+        # ── Left: image list ──
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        # Toolbar
+        tb = Gtk.Toolbar()
+        tb.set_style(Gtk.ToolbarStyle.TEXT)
+
+        def tbtn(label, cb):
+            b = Gtk.ToolButton()
+            b.set_label(label)
+            b.connect("clicked", cb)
+            tb.insert(b, -1)
+            return b
+
+        tbtn("➕ Add Image(s)", self._on_add_images)
+        tbtn("✖ Remove",        self._on_remove_image)
+        tb.insert(Gtk.SeparatorToolItem(), -1)
+        tbtn("💾 Mount A:",     self._on_mount_a)
+        tbtn("💾 Mount B:",     self._on_mount_b)
+        tbtn("⏏ Eject",        self._on_eject_selected)
+        tb.insert(Gtk.SeparatorToolItem(), -1)
+        tbtn("🆕 Create Image", self._on_create_image)
+        tbtn("📂 Open Folder",  self._on_open_lib_folder)
+        left.pack_start(tb, False, False, 0)
+
+        # ListView
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+
+        # columns: name, size, path, last_used
+        self._store = Gtk.ListStore(str, str, str, str)
+        self._tv = Gtk.TreeView(model=self._store)
+        self._tv.set_headers_visible(True)
+        self._tv.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
+        self._tv.connect("row-activated", self._on_row_activated)
+
+        # Drag-and-drop on treeview
+        self._tv.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY)
+        self._tv.drag_dest_add_uri_targets()
+        self._tv.connect("drag-data-received", self._on_drag_data)
+
+        for i, (title, width) in enumerate([("Name", 180), ("Size", 80),
+                                             ("Path", 280), ("Last Used", 130)]):
+            renderer = Gtk.CellRendererText()
+            col = Gtk.TreeViewColumn(title, renderer, text=i)
+            col.set_resizable(True)
+            col.set_min_width(width)
+            self._tv.append_column(col)
+
+        scroll.add(self._tv)
+        left.pack_start(scroll, True, True, 0)
+
+        # Library path bar
+        lib_bar = Gtk.Box(spacing=6)
+        lib_bar.set_margin_top(4); lib_bar.set_margin_bottom(4)
+        lib_bar.set_margin_start(4); lib_bar.set_margin_end(4)
+        lib_bar.pack_start(Gtk.Label(label="Library Folder:"), False, False, 0)
+        self._lib_entry = Gtk.Entry()
+        self._lib_entry.set_hexpand(True)
+        self._lib_entry.set_editable(False)
+        lib_bar.pack_start(self._lib_entry, True, True, 0)
+        btn_lib = Gtk.Button(label="📂  Browse…")
+        btn_lib.connect("clicked", self._on_browse_library)
+        lib_bar.pack_start(btn_lib, False, False, 0)
+        left.pack_start(lib_bar, False, False, 0)
+
+        # Context menu
+        self._ctx_menu = Gtk.Menu()
+        for label, cb in [("💾  Mount as A:", self._on_mount_a),
+                           ("💾  Mount as B:", self._on_mount_b),
+                           (None, None),
+                           ("📂  Open containing folder", self._on_ctx_open_folder),
+                           (None, None),
+                           ("✖  Remove from list", self._on_remove_image)]:
+            if label is None:
+                self._ctx_menu.append(Gtk.SeparatorMenuItem())
+            else:
+                item = Gtk.MenuItem(label=label)
+                item.connect("activate", cb)
+                self._ctx_menu.append(item)
+        self._ctx_menu.show_all()
+        self._tv.connect("button-press-event", self._on_tv_button_press)
+
+        paned.pack1(left, True, False)
+
+        # ── Right: mounted + quick access ──
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        right.set_margin_top(8); right.set_margin_bottom(8)
+        right.set_margin_start(8); right.set_margin_end(8)
+
+        # Mounted frame
+        mframe = Gtk.Frame(label="  💿  Currently Mounted  ")
+        mgrid = Gtk.Grid()
+        mgrid.set_row_spacing(6); mgrid.set_column_spacing(8)
+        mgrid.set_margin_top(8); mgrid.set_margin_bottom(8)
+        mgrid.set_margin_start(8); mgrid.set_margin_end(8)
+
+        mgrid.attach(Gtk.Label(label="A:"), 0, 0, 1, 1)
+        self._lbl_a = Gtk.Label(label="(empty)")
+        self._lbl_a.set_halign(Gtk.Align.START)
+        self._lbl_a.set_hexpand(True)
+        mgrid.attach(self._lbl_a, 1, 0, 1, 1)
+        self._btn_eject_a = Gtk.Button(label="⏏ Eject A:")
+        self._btn_eject_a.connect("clicked", self._on_eject_a)
+        mgrid.attach(self._btn_eject_a, 2, 0, 1, 1)
+
+        mgrid.attach(Gtk.Label(label="B:"), 0, 1, 1, 1)
+        self._lbl_b = Gtk.Label(label="(empty)")
+        self._lbl_b.set_halign(Gtk.Align.START)
+        mgrid.attach(self._lbl_b, 1, 1, 1, 1)
+        self._btn_eject_b = Gtk.Button(label="⏏ Eject B:")
+        self._btn_eject_b.connect("clicked", self._on_eject_b)
+        mgrid.attach(self._btn_eject_b, 2, 1, 1, 1)
+
+        mframe.add(mgrid)
+        right.pack_start(mframe, False, False, 0)
+
+        # Quick access frame
+        qframe = Gtk.Frame(label="  ⚡  Quick Access (Last 5)  ")
+        self._quick_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self._quick_box.set_margin_top(8); self._quick_box.set_margin_bottom(8)
+        self._quick_box.set_margin_start(8); self._quick_box.set_margin_end(8)
+        qframe.add(self._quick_box)
+        right.pack_start(qframe, False, False, 0)
+
+        paned.pack2(right, False, False)
+        return paned
+
+    # ── Settings Tab ─────────────────────────────────────────────────────────
+    def _build_settings_tab(self):
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        outer.set_margin_top(16); outer.set_margin_bottom(16)
+        outer.set_margin_start(16); outer.set_margin_end(16)
+
+        def make_frame(title):
+            f = Gtk.Frame(label="  " + title + "  ")
+            f.set_shadow_type(Gtk.ShadowType.ETCHED_IN)
+            g = Gtk.Grid()
+            g.set_row_spacing(8); g.set_column_spacing(8)
+            g.set_margin_top(10); g.set_margin_bottom(10)
+            g.set_margin_start(10); g.set_margin_end(10)
+            f.add(g)
+            return f, g
+
+        def entry_row(grid, row, label, placeholder=""):
+            grid.attach(Gtk.Label(label=label, xalign=1), 0, row, 1, 1)
+            e = Gtk.Entry()
+            e.set_hexpand(True)
+            e.set_placeholder_text(placeholder)
+            grid.attach(e, 1, row, 1, 1)
+            return e
+
+        def browse_btn(grid, row, cb, label="📂  Browse…"):
+            b = Gtk.Button(label=label)
+            b.connect("clicked", cb)
+            grid.attach(b, 2, row, 1, 1)
+            return b
+
+        # DOSBox section
+        f1, g1 = make_frame("⚙  DOSBox Configuration")
+        self._s_exe   = entry_row(g1, 0, "DOSBox Executable:", "e.g. /usr/bin/dosbox")
+        browse_btn(g1, 0, self._on_browse_dosbox_exe)
+        self._s_conf  = entry_row(g1, 1, "Config File:", "optional dosbox.conf path")
+        browse_btn(g1, 1, self._on_browse_config)
+        btn_edit = Gtk.Button(label="✏  Edit Config")
+        btn_edit.connect("clicked", self._on_edit_config)
+        g1.attach(btn_edit, 3, 1, 1, 1)
+        outer.pack_start(f1, False, False, 0)
+
+        # Performance section
+        f2, g2 = make_frame("🖥  Performance")
+        g2.attach(Gtk.Label(label="CPU Cycles:", xalign=1), 0, 0, 1, 1)
+        self._s_cycles = Gtk.Entry()
+        self._s_cycles.set_text("auto")
+        self._s_cycles.set_size_request(120, -1)
+        g2.attach(self._s_cycles, 1, 0, 1, 1)
+
+        g2.attach(Gtk.Label(label="Memory (MB):", xalign=1), 2, 0, 1, 1)
+        self._s_mem = Gtk.ComboBoxText()
+        for v in ["1","2","4","8","16","32","63"]:
+            self._s_mem.append_text(v)
+        self._s_mem.set_active(3)
+        g2.attach(self._s_mem, 3, 0, 1, 1)
+
+        self._s_fullscreen = Gtk.CheckButton(label="Start in Fullscreen")
+        g2.attach(self._s_fullscreen, 0, 1, 2, 1)
+        outer.pack_start(f2, False, False, 0)
+
+        # Library section
+        f3, g3 = make_frame("💾  Floppy Library")
+        self._s_lib = entry_row(g3, 0, "Default Library Folder:")
+        browse_btn(g3, 0, self._on_browse_library)
+        outer.pack_start(f3, False, False, 0)
+
+        # Buttons
+        btn_row = Gtk.Box(spacing=8)
+        btn_save = Gtk.Button(label="💾  Save Settings")
+        btn_save.get_style_context().add_class("suggested-action")
+        btn_save.connect("clicked", self._on_save_settings)
+        btn_row.pack_start(btn_save, False, False, 0)
+        btn_reset = Gtk.Button(label="↺  Reset Defaults")
+        btn_reset.connect("clicked", self._on_reset_settings)
+        btn_row.pack_start(btn_reset, False, False, 0)
+        outer.pack_start(btn_row, False, False, 0)
+
+        return outer
+
+    # ── About Tab ─────────────────────────────────────────────────────────────
+    def _build_about_tab(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(30); box.set_margin_start(30)
+
+        title = Gtk.Label()
+        title.set_markup('<span size="xx-large" weight="bold" color="#0078d7">💾 DOSBox Frontend</span>')
+        title.set_halign(Gtk.Align.START)
+        box.pack_start(title, False, False, 0)
+
+        box.pack_start(Gtk.Label(label=f"Version {APP_VERSION}", xalign=0), False, False, 0)
+        box.pack_start(Gtk.Label(
+            label="A feature-rich frontend for DOSBox with floppy disk image management.", xalign=0),
+            False, False, 0)
+
+        features = (
+            "Features:\n"
+            "  • Launch DOSBox with one click\n"
+            "  • Manage a library of floppy disk images (.img .ima .vfd .flp)\n"
+            "  • Mount floppy images as drive A: or B: in DOSBox\n"
+            "  • Drag-and-drop floppy images onto the window\n"
+            "  • Quick Access panel for the 5 most recently used images\n"
+            "  • Create new blank floppy images (FAT12 formatted)\n"
+            "  • Persistent settings saved to ~/.config/dosbox-frontend/\n"
+            "  • DOSBox process monitoring"
+        )
+        lbl = Gtk.Label(label=features, xalign=0)
+        lbl.set_line_wrap(True)
+        box.pack_start(lbl, False, False, 0)
+
+        box.pack_start(Gtk.Label(label="Built with Python 3 + GTK3", xalign=0), False, False, 0)
+        return box
+
+    # ── Refresh helpers ───────────────────────────────────────────────────────
+    def _refresh_all(self):
+        s = self._settings
+        self._launch_exe_entry.set_text(s.get("dosbox_exe", ""))
+        self._lib_entry.set_text(s.get("library_folder", str(Path.home())))
+        self._s_exe.set_text(s.get("dosbox_exe", ""))
+        self._s_conf.set_text(s.get("dosbox_config", ""))
+        self._s_lib.set_text(s.get("library_folder", str(Path.home())))
+        self._s_cycles.set_text(s.get("cycles", "auto"))
+        self._s_fullscreen.set_active(s.get("fullscreen", False))
+        mem_vals = ["1","2","4","8","16","32","63"]
+        idx = mem_vals.index(s.get("memory_mb","8")) if s.get("memory_mb","8") in mem_vals else 3
+        self._s_mem.set_active(idx)
+        self._refresh_image_list()
+        self._refresh_recent_combo()
+        self._refresh_quick_access()
+        self._refresh_mounted_display()
+
+    def _refresh_image_list(self):
+        self._store.clear()
+        for img in self._settings.get("images", []):
+            path = img.get("path","")
+            name = os.path.basename(path)
+            try:
+                size_kb = str(os.path.getsize(path) // 1024) + " KB"
+            except Exception:
+                size_kb = "?"
+            lu = img.get("last_used","")
+            self._store.append([name, size_kb, path, lu])
+
+    def _refresh_recent_combo(self):
+        self._recent_combo.remove_all()
+        for r in self._settings.get("recent", [])[:20]:
+            self._recent_combo.append_text(r)
+        if self._recent_combo.get_model() and len(self._recent_combo.get_model()) > 0:
+            self._recent_combo.set_active(0)
+
+    def _refresh_quick_access(self):
+        for child in self._quick_box.get_children():
+            self._quick_box.remove(child)
+        for path in self._settings.get("recent", [])[:5]:
+            btn = Gtk.Button(label=os.path.basename(path))
+            btn.set_tooltip_text(path)
+            btn.connect("clicked", lambda _b, p=path: self._mount_image(p, "A"))
+            self._quick_box.pack_start(btn, False, False, 0)
+        self._quick_box.show_all()
+
+    def _refresh_mounted_display(self):
+        self._lbl_a.set_text(os.path.basename(self._mounted_a) if self._mounted_a else "(empty)")
+        self._lbl_b.set_text(os.path.basename(self._mounted_b) if self._mounted_b else "(empty)")
+        self._btn_eject_a.set_sensitive(bool(self._mounted_a))
+        self._btn_eject_b.set_sensitive(bool(self._mounted_b))
+        self._refresh_image_list()
+
+    def _set_status(self, msg):
+        self._statusbar.pop(self._status_ctx)
+        self._statusbar.push(self._status_ctx, msg)
+
+    def _poll_dosbox(self):
+        running = False
+        if self._dosbox_pid is not None:
+            try:
+                os.kill(self._dosbox_pid, 0)
+                running = True
+            except (ProcessLookupError, PermissionError):
+                self._dosbox_pid = None
+        self._launch_status_lbl.set_text(
+            "DOSBox: Running" if running else "DOSBox: Not Running")
+        return True  # keep timer alive
+
+    # ── Library helpers ───────────────────────────────────────────────────────
+    def _add_image_to_library(self, path):
+        images = self._settings.setdefault("images", [])
+        if any(i["path"] == path for i in images):
+            return
+        images.append({"path": path, "last_used": ""})
+
+    def _add_to_recent(self, path):
+        recent = self._settings.setdefault("recent", [])
+        recent = [r for r in recent if r != path]
+        recent.insert(0, path)
+        self._settings["recent"] = recent[:20]
+
+    def _update_last_used(self, path):
+        for img in self._settings.get("images", []):
+            if img["path"] == path:
+                img["last_used"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    def _mount_image(self, path, drive):
+        if not os.path.exists(path):
+            self._show_error(f"File not found:\n{path}")
+            return
+        if drive == "A":
+            self._mounted_a = path
+        else:
+            self._mounted_b = path
+        self._update_last_used(path)
+        self._add_to_recent(path)
+        self._refresh_mounted_display()
+        self._refresh_recent_combo()
+        self._refresh_quick_access()
+        save_settings(self._settings)
+        self._set_status(f"Mounted {os.path.basename(path)} as {drive}:")
+        if self._dosbox_pid is not None:
+            try:
+                os.kill(self._dosbox_pid, 0)
+                self._show_info(
+                    "DOSBox is already running.\n"
+                    f"To mount inside DOSBox, type in the DOSBox window:\n\n"
+                    f"  imgmount {drive.lower()} \"{path}\" -t floppy")
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    def _get_selected_path(self):
+        sel = self._tv.get_selection()
+        model, paths = sel.get_selected_rows()
+        if not paths:
+            return None
+        return model[paths[0]][2]
+
+    def _get_all_selected_paths(self):
+        sel = self._tv.get_selection()
+        model, paths = sel.get_selected_rows()
+        return [model[p][2] for p in paths]
+
+    # ── Event handlers ────────────────────────────────────────────────────────
+    def _on_launch_dosbox(self, _btn):
+        self._launch_dosbox("")
+
+    def _on_quick_launch(self, _btn):
+        dlg = Gtk.FileChooserDialog(title="Select Floppy Image to Mount as A:",
+                                    parent=self, action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_OPEN,   Gtk.ResponseType.OK)
+        dlg.set_current_folder(self._settings.get("library_folder", str(Path.home())))
+        ff = Gtk.FileFilter()
+        ff.set_name("Floppy Images (*.img *.ima *.vfd *.flp)")
+        for p in ["*.img","*.ima","*.vfd","*.flp"]:
+            ff.add_pattern(p)
+        dlg.add_filter(ff)
+        if dlg.run() == Gtk.ResponseType.OK:
+            path = dlg.get_filename()
+            dlg.destroy()
+            self._add_to_recent(path)
+            self._launch_dosbox(path)
+        else:
+            dlg.destroy()
+
+    def _on_launch_recent(self, _btn):
+        path = self._recent_combo.get_active_text()
+        if not path:
+            self._launch_dosbox("")
+            return
+        if os.path.exists(path):
+            self._add_to_recent(path)
+            self._launch_dosbox(path)
+        else:
+            self._show_error(f"File not found:\n{path}")
+
+    def _launch_dosbox(self, floppy_path):
+        exe = self._settings.get("dosbox_exe","").strip()
+        if not exe:
+            exe = shutil.which("dosbox") or ""
+        if not exe or not os.path.exists(exe):
+            self._show_error("DOSBox executable not found.\nPlease set it in Settings.")
+            return
+        args = [exe]
+        cfg = self._settings.get("dosbox_config","").strip()
+        if cfg and os.path.exists(cfg):
+            args += ["-conf", cfg]
+        if floppy_path and os.path.exists(floppy_path):
+            args += ["-c", f"imgmount a \"{floppy_path}\" -t floppy"]
+            self._mounted_a = floppy_path
+            self._refresh_mounted_display()
+        if self._settings.get("fullscreen"):
+            args.append("-fullscreen")
+        try:
+            proc = subprocess.Popen(args)
+            self._dosbox_pid = proc.pid
+            self._set_status("DOSBox launched.")
+        except Exception as ex:
+            self._show_error(f"Failed to launch DOSBox:\n{ex}")
+
+    def _on_launch_exe_changed(self, entry):
+        self._settings["dosbox_exe"] = entry.get_text()
+        self._s_exe.set_text(entry.get_text())
+
+    def _on_browse_dosbox_exe(self, _btn):
+        dlg = Gtk.FileChooserDialog(title="Locate DOSBox Executable",
+                                    parent=self, action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_OPEN,   Gtk.ResponseType.OK)
+        if dlg.run() == Gtk.ResponseType.OK:
+            path = dlg.get_filename()
+            self._settings["dosbox_exe"] = path
+            self._launch_exe_entry.set_text(path)
+            self._s_exe.set_text(path)
+            save_settings(self._settings)
+        dlg.destroy()
+
+    def _on_browse_config(self, _btn):
+        dlg = Gtk.FileChooserDialog(title="Select DOSBox Config File",
+                                    parent=self, action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_OPEN,   Gtk.ResponseType.OK)
+        ff = Gtk.FileFilter()
+        ff.set_name("Config files (*.conf *.cfg)")
+        ff.add_pattern("*.conf"); ff.add_pattern("*.cfg")
+        dlg.add_filter(ff)
+        if dlg.run() == Gtk.ResponseType.OK:
+            self._s_conf.set_text(dlg.get_filename())
+        dlg.destroy()
+
+    def _on_edit_config(self, _btn):
+        cfg = self._s_conf.get_text().strip()
+        if not cfg:
+            self._show_info("No config file selected.")
+            return
+        if not os.path.exists(cfg):
+            self._show_error(f"Config file not found:\n{cfg}")
+            return
+        for editor in ["gedit","kate","mousepad","xed","nano","vi"]:
+            if shutil.which(editor):
+                subprocess.Popen([editor, cfg])
+                return
+
+    def _on_browse_library(self, _btn):
+        dlg = Gtk.FileChooserDialog(title="Select Floppy Library Folder",
+                                    parent=self,
+                                    action=Gtk.FileChooserAction.SELECT_FOLDER)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_OPEN,   Gtk.ResponseType.OK)
+        dlg.set_current_folder(self._settings.get("library_folder", str(Path.home())))
+        if dlg.run() == Gtk.ResponseType.OK:
+            folder = dlg.get_filename()
+            self._settings["library_folder"] = folder
+            self._lib_entry.set_text(folder)
+            self._s_lib.set_text(folder)
+            save_settings(self._settings)
+        dlg.destroy()
+
+    def _on_add_images(self, _btn):
+        dlg = Gtk.FileChooserDialog(title="Add Floppy Image(s) to Library",
+                                    parent=self, action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_OPEN,   Gtk.ResponseType.OK)
+        dlg.set_select_multiple(True)
+        dlg.set_current_folder(self._settings.get("library_folder", str(Path.home())))
+        ff = Gtk.FileFilter()
+        ff.set_name("Floppy Images (*.img *.ima *.vfd *.flp)")
+        for p in ["*.img","*.ima","*.vfd","*.flp"]:
+            ff.add_pattern(p)
+        dlg.add_filter(ff)
+        all_ff = Gtk.FileFilter(); all_ff.set_name("All Files"); all_ff.add_pattern("*")
+        dlg.add_filter(all_ff)
+        if dlg.run() == Gtk.ResponseType.OK:
+            for f in dlg.get_filenames():
+                self._add_image_to_library(f)
+            self._refresh_image_list()
+            save_settings(self._settings)
+        dlg.destroy()
+
+    def _on_remove_image(self, _btn):
+        paths = self._get_all_selected_paths()
+        if not paths:
+            return
+        images = self._settings.get("images", [])
+        self._settings["images"] = [i for i in images if i["path"] not in paths]
+        self._refresh_image_list()
+        save_settings(self._settings)
+
+    def _on_mount_a(self, _btn):
+        path = self._get_selected_path()
+        if path:
+            self._mount_image(path, "A")
+
+    def _on_mount_b(self, _btn):
+        path = self._get_selected_path()
+        if path:
+            self._mount_image(path, "B")
+
+    def _on_eject_selected(self, _btn):
+        path = self._get_selected_path()
+        if path:
+            if self._mounted_a == path: self._mounted_a = ""
+            if self._mounted_b == path: self._mounted_b = ""
+            self._refresh_mounted_display()
+
+    def _on_eject_a(self, _btn):
+        self._mounted_a = ""
+        self._refresh_mounted_display()
+
+    def _on_eject_b(self, _btn):
+        self._mounted_b = ""
+        self._refresh_mounted_display()
+
+    def _on_row_activated(self, _tv, _path, _col):
+        path = self._get_selected_path()
+        if path:
+            self._mount_image(path, "A")
+
+    def _on_tv_button_press(self, _tv, event):
+        if event.button == 3:
+            self._ctx_menu.popup_at_pointer(event)
+
+    def _on_ctx_open_folder(self, _item):
+        path = self._get_selected_path()
+        if path:
+            folder = os.path.dirname(path)
+            for fm in ["nautilus","thunar","nemo","dolphin","xdg-open"]:
+                if shutil.which(fm):
+                    subprocess.Popen([fm, folder])
+                    return
+
+    def _on_create_image(self, _btn):
+        dlg = CreateImageDialog(self, self._settings.get("library_folder", str(Path.home())))
+        if dlg.run() == Gtk.ResponseType.OK:
+            out = dlg.output_path
+            size = dlg.size_bytes
+            dlg.destroy()
+            try:
+                create_blank_floppy(out, size)
+                self._add_image_to_library(out)
+                self._refresh_image_list()
+                save_settings(self._settings)
+                self._set_status(f"Created: {os.path.basename(out)}")
+                self._show_info(f"Blank floppy image created:\n{out}")
+            except Exception as ex:
+                self._show_error(f"Failed to create image:\n{ex}")
+        else:
+            dlg.destroy()
+
+    def _on_open_lib_folder(self, _btn):
+        folder = self._settings.get("library_folder", str(Path.home()))
+        for fm in ["nautilus","thunar","nemo","dolphin","xdg-open"]:
+            if shutil.which(fm):
+                subprocess.Popen([fm, folder])
+                return
+
+    def _on_drag_data(self, _widget, _ctx, _x, _y, data, _info, _time):
+        uris = data.get_uris()
+        added = False
+        for uri in uris:
+            if uri.startswith("file://"):
+                path = uri[7:].rstrip()
+                if Path(path).suffix.lower() in FLOPPY_EXTS:
+                    self._add_image_to_library(path)
+                    added = True
+        if added:
+            self._refresh_image_list()
+            save_settings(self._settings)
+
+    def _on_save_settings(self, _btn):
+        self._settings["dosbox_exe"]     = self._s_exe.get_text().strip()
+        self._settings["dosbox_config"]  = self._s_conf.get_text().strip()
+        self._settings["library_folder"] = self._s_lib.get_text().strip()
+        self._settings["cycles"]         = self._s_cycles.get_text().strip()
+        self._settings["memory_mb"]      = self._s_mem.get_active_text() or "8"
+        self._settings["fullscreen"]     = self._s_fullscreen.get_active()
+        self._launch_exe_entry.set_text(self._settings["dosbox_exe"])
+        self._lib_entry.set_text(self._settings["library_folder"])
+        save_settings(self._settings)
+        self._set_status("Settings saved.")
+        self._show_info("Settings saved.")
+
+    def _on_reset_settings(self, _btn):
+        dlg = Gtk.MessageDialog(parent=self, flags=0,
+                                message_type=Gtk.MessageType.QUESTION,
+                                buttons=Gtk.ButtonsType.YES_NO,
+                                text="Reset all settings to defaults?")
+        if dlg.run() == Gtk.ResponseType.YES:
+            self._settings.update({
+                "dosbox_exe": "", "dosbox_config": "",
+                "library_folder": str(Path.home()),
+                "cycles": "auto", "memory_mb": "8", "fullscreen": False})
+            self._refresh_all()
+            save_settings(self._settings)
+        dlg.destroy()
+
+    def _on_delete(self, _win, _event):
+        save_settings(self._settings)
+        return False
+
+    def _on_destroy(self, _win):
+        save_settings(self._settings)
+        Gtk.main_quit()
+
+    # ── Dialogs ───────────────────────────────────────────────────────────────
+    def _show_error(self, msg):
+        dlg = Gtk.MessageDialog(parent=self, flags=0,
+                                message_type=Gtk.MessageType.ERROR,
+                                buttons=Gtk.ButtonsType.OK, text=msg)
+        dlg.run(); dlg.destroy()
+
+    def _show_info(self, msg):
+        dlg = Gtk.MessageDialog(parent=self, flags=0,
+                                message_type=Gtk.MessageType.INFO,
+                                buttons=Gtk.ButtonsType.OK, text=msg)
+        dlg.run(); dlg.destroy()
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    win = MainWindow()
+    Gtk.main()

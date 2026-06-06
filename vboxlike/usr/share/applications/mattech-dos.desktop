@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=MatTech DOS
+GenericName=DOS Emulator Frontend
+Comment=VirtualBox-style DOSBox frontend with floppy and CD-ROM management
+Exec=mattech-dos
+Icon=mattech-dos
+Terminal=false
+Categories=Emulator;Game;
+Keywords=dos;dosbox;floppy;cdrom;emulator;retro;msdos;windows95;
+StartupNotify=true
+StartupWMClass=mattech-dos

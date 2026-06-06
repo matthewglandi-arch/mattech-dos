@@ -1,0 +1,2588 @@
+#!/usr/bin/python3
+"""
+MatTech DOS – A VirtualBox-style DOSBox frontend
+"""
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib, Pango
+
+import os, sys, json, subprocess, shutil, struct, threading, urllib.request
+import urllib.parse, hashlib, time
+from pathlib import Path
+from datetime import datetime
+
+APP_NAME    = "mattech-dos"
+APP_VERSION = "1.0.0"
+CONFIG_DIR  = Path.home() / ".config" / "mattech-dos"
+MACHINES_FILE = CONFIG_DIR / "machines.json"
+MEDIA_DIR   = CONFIG_DIR / "media"
+LOG_FILE    = CONFIG_DIR / "download.log"
+
+def log(msg):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    with open(LOG_FILE, "a") as f:
+        f.write(line + "\n")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DOS VERSION DATABASE
+# Each entry: display name, cycles, ram_mb, disk_mb, media_type, drives, sources
+# media_type: "floppy" | "cdrom" | "both"
+# drives: list of {"letter": "A", "type": "floppy"|"cdrom"|"hdd", "label": "..."}
+# sources: list of archive.org item IDs or direct URLs
+# ─────────────────────────────────────────────────────────────────────────────
+DOS_DB = {
+    "msdos_622": {
+        "name": "MS-DOS 6.22",
+        "cycles": 3000,
+        "ram_mb": 16,
+        "disk_mb": 40,
+        "media_type": "floppy",
+        "cpu": "386",
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Boot Floppy"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+        ],
+        "disks": [
+            {"label": "Disk 1 (Boot)", "file": "msdos622_disk1.img",
+             "url": "https://archive.org/download/msdos-622/dos-622-disk1.img"},
+            {"label": "Disk 2",        "file": "msdos622_disk2.img",
+             "url": "https://archive.org/download/msdos-622/dos-622-disk2.img"},
+            {"label": "Disk 3",        "file": "msdos622_disk3.img",
+             "url": "https://archive.org/download/msdos-622/dos-622-disk3.img"},
+        ],
+        "boot_disk": "msdos622_disk1.img",
+        "archive_id": "msdos-622",
+        "description": "Microsoft MS-DOS 6.22 – the last standalone MS-DOS release.",
+    },
+    "msdos_500": {
+        "name": "MS-DOS 5.00",
+        "cycles": 2000,
+        "ram_mb": 8,
+        "disk_mb": 20,
+        "media_type": "floppy",
+        "cpu": "286",
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Boot Floppy"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+        ],
+        "disks": [
+            {"label": "Disk 1 (Boot/All)", "file": "msdos500_disk1.img",
+             "url": "https://archive.org/download/dos5.0a/DOS%205.0A.IMA"},
+            {"label": "Uninstall Disk (blank)", "file": "msdos500_uninstall.img",
+             "url": "", "create_blank": True},
+        ],
+        "boot_disk": "msdos500_disk1.img",
+        "archive_id": "dos5.0a",
+        "description": "Microsoft MS-DOS 5.00. When setup asks for uninstall disk, insert 'Uninstall Disk (blank)' into A:.",
+    },
+    "win311": {
+        "name": "Windows 3.11",
+        "cycles": 8000,
+        "ram_mb": 16,
+        "disk_mb": 60,
+        "media_type": "floppy",
+        "cpu": "486",
+        "requires_dos": True,
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Install Floppy"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+        ],
+        "disks": [
+            {"label": "DOS Disk 1", "file": "win311_dos1.img",
+             "url": "https://archive.org/download/dos-622-3/Dos622-1.img"},
+            {"label": "DOS Disk 2", "file": "win311_dos2.img",
+             "url": "https://archive.org/download/dos-622-3/Dos622-2.img"},
+            {"label": "DOS Disk 3", "file": "win311_dos3.img",
+             "url": "https://archive.org/download/dos-622-3/Dos622-3.img"},
+            {"label": "Win Disk 1", "file": "win311_disk1.img",
+             "url": "https://archive.org/download/dos-622-3/WfW311-1.img"},
+            {"label": "Win Disk 2", "file": "win311_disk2.img",
+             "url": "https://archive.org/download/dos-622-3/WfW311-2.img"},
+            {"label": "Win Disk 3", "file": "win311_disk3.img",
+             "url": "https://archive.org/download/dos-622-3/WfW311-3.img"},
+            {"label": "Win Disk 4", "file": "win311_disk4.img",
+             "url": "https://archive.org/download/dos-622-3/WfW311-4.img"},
+            {"label": "Win Disk 5", "file": "win311_disk5.img",
+             "url": "https://archive.org/download/dos-622-3/WfW311-5.img"},
+            {"label": "Win Disk 6", "file": "win311_disk6.img",
+             "url": "https://archive.org/download/dos-622-3/WfW311-6.img"},
+            {"label": "Win Disk 7", "file": "win311_disk7.img",
+             "url": "https://archive.org/download/dos-622-3/WfW311-7.img"},
+            {"label": "Win Disk 8", "file": "win311_disk8.img",
+             "url": "https://archive.org/download/dos-622-3/WfW311-8.img"},
+        ],
+        "boot_disk": "win311_dos1.img",
+        "archive_id": "dos-622-3",
+        "description": "Windows 3.11 for Workgroups. Install DOS first, then Windows.",
+    },
+    "win10": {
+        "name": "Windows 1.0",
+        "cycles": 500,
+        "ram_mb": 4,
+        "disk_mb": 10,
+        "media_type": "floppy",
+        "cpu": "286",
+        "requires_dos": True,
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Floppy Drive A"},
+            {"letter": "B", "type": "floppy", "label": "Floppy Drive B"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+        ],
+        "disks": [
+            {"label": "DOS 3.30 Disk 1 (Boot)", "file": "win10_dos1.img",
+             "url": "https://archive.org/download/ibm-dos-3.30-floppy-disks/IBM%20DOS%203.30%20360K%20Disks%20-%20Disk%2001.img"},
+            {"label": "DOS 3.30 Disk 2",        "file": "win10_dos2.img",
+             "url": "https://archive.org/download/ibm-dos-3.30-floppy-disks/IBM%20DOS%203.30%20360K%20Disks%20-%20Disk%2002.img"},
+            {"label": "Mouse Driver Setup", "file": "mouse_driver.img",
+             "url": "https://archive.org/download/microsoft_mouse_v70_paintbrush_v40-/Microsoft%20Mouse%20v7.0%20%26%20Paintbrush%20v4.0%20%28Disk%201%29%20Setup%20%2807796%29%28Microsoft%20Corporation%29%281989%29.img"},
+            {"label": "Win 1.0 Disk 1 - Setup",    "file": "win10_disk1.img",
+             "url": "https://archive.org/download/windows-1.0_202109/Windows%201.0%20Disk%2001%20-%20Setup.img"},
+            {"label": "Win 1.0 Disk 2 - Build",    "file": "win10_disk2.img",
+             "url": "https://archive.org/download/windows-1.0_202109/Windows%201.0%20Disk%2002%20-%20Build.img"},
+            {"label": "Win 1.0 Disk 3 - Fonts",    "file": "win10_disk3.img",
+             "url": "https://archive.org/download/windows-1.0_202109/Windows%201.0%20Disk%2003%20-%20Fonts.img"},
+            {"label": "Win 1.0 Disk 4 - Apps",     "file": "win10_disk4.img",
+             "url": "https://archive.org/download/windows-1.0_202109/Windows%201.0%20Disk%2004%20-%20Apps.img"},
+            {"label": "Win 1.0 Disk 5 - Printers", "file": "win10_disk5.img",
+             "url": "https://archive.org/download/windows-1.0_202109/Windows%201.0%20Disk%2005%20-%20Printers.img"},
+        ],
+        "boot_disk": "win10_dos1.img",
+        "archive_id": "windows-1.0_202109",
+        "description": "Windows 1.0 (1985). Boots IBM DOS 3.30, then run SETUP from Win 1.0 Disk 1.",
+    },
+    "win20": {
+        "name": "Windows 2.0",
+        "cycles": 1000,
+        "ram_mb": 4,
+        "disk_mb": 10,
+        "media_type": "floppy",
+        "cpu": "286",
+        "requires_dos": True,
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Floppy Drive A"},
+            {"letter": "B", "type": "floppy", "label": "Floppy Drive B"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+        ],
+        "disks": [
+            {"label": "DOS 3.30 Disk 1 (Boot)", "file": "win20_dos1.img",
+             "url": "https://archive.org/download/ibm-dos-3.30-floppy-disks/IBM%20DOS%203.30%20360K%20Disks%20-%20Disk%2001.img"},
+            {"label": "DOS 3.30 Disk 2",        "file": "win20_dos2.img",
+             "url": "https://archive.org/download/ibm-dos-3.30-floppy-disks/IBM%20DOS%203.30%20360K%20Disks%20-%20Disk%2002.img"},
+            {"label": "Win 2.0 All Disks (zip)", "file": "win20_all.zip",
+             "url": "https://archive.org/download/microsoft-windows-v2.0/Microsoft%20-%20Windows%20v2.0%20%281987%29.zip"},
+        ],
+        "boot_disk": "win20_dos1.img",
+        "archive_id": "microsoft-windows-v2.0",
+        "description": "Windows 2.0 (1987). Boots DOS 3.30, then extract win20_all.zip and run SETUP.EXE.",
+    },
+    "win30": {
+        "name": "Windows 3.0",
+        "cycles": 4000,
+        "ram_mb": 8,
+        "disk_mb": 30,
+        "media_type": "floppy",
+        "cpu": "386",
+        "requires_dos": True,
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Install Floppy"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+        ],
+        "disks": [
+            {"label": "DOS Disk 1 (Boot)", "file": "win30_dos1.img",
+             "url": "https://archive.org/download/msdos-622/dos-622-disk1.img"},
+            {"label": "DOS Disk 2",        "file": "win30_dos2.img",
+             "url": "https://archive.org/download/msdos-622/dos-622-disk2.img"},
+            {"label": "DOS Disk 3",        "file": "win30_dos3.img",
+             "url": "https://archive.org/download/msdos-622/dos-622-disk3.img"},
+            {"label": "Win 3.0 Disk 1",  "file": "win30_disk01.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk01.img"},
+            {"label": "Win 3.0 Disk 2",  "file": "win30_disk02.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk02.img"},
+            {"label": "Win 3.0 Disk 3",  "file": "win30_disk03.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk03.img"},
+            {"label": "Win 3.0 Disk 4",  "file": "win30_disk04.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk04.img"},
+            {"label": "Win 3.0 Disk 5",  "file": "win30_disk05.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk05.img"},
+            {"label": "Win 3.0 Disk 6",  "file": "win30_disk06.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk06.img"},
+            {"label": "Win 3.0 Disk 7",  "file": "win30_disk07.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk07.img"},
+            {"label": "Win 3.0 Disk 8",  "file": "win30_disk08.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk08.img"},
+            {"label": "Win 3.0 Disk 9",  "file": "win30_disk09.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk09.img"},
+            {"label": "Win 3.0 Disk 10", "file": "win30_disk10.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk10.img"},
+            {"label": "Win 3.0 Disk 11", "file": "win30_disk11.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk11.img"},
+            {"label": "Win 3.0 Disk 12", "file": "win30_disk12.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk12.img"},
+            {"label": "Win 3.0 Disk 13", "file": "win30_disk13.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk13.img"},
+            {"label": "Win 3.0 Disk 14", "file": "win30_disk14.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk14.img"},
+            {"label": "Win 3.0 Disk 15", "file": "win30_disk15.img", "url": "https://archive.org/download/windows-3.0a-360-kb-disks/disk15.img"},
+        ],
+        "boot_disk": "win30_dos1.img",
+        "archive_id": "windows-3.0a-360-kb-disks",
+        "description": "Windows 3.0 (1990). Installs MS-DOS 6.22 first, then Windows 3.0.",
+    },
+    "winnt351": {
+        "name": "Windows NT 3.51",
+        "cycles": 20000,
+        "ram_mb": 32,
+        "disk_mb": 500,
+        "media_type": "cdrom",
+        "cpu": "pentium",
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Boot Floppy"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+            {"letter": "D", "type": "cdrom",  "label": "CD-ROM"},
+        ],
+        "disks": [
+            {"label": "Install CD", "file": "winnt351.iso",
+             "url": "https://archive.org/download/WinNT-101935/WinNT351.iso",
+             "min_size_mb": 200},
+        ],
+        "boot_cdrom": "winnt351.iso",
+        "archive_id": "WinNT-101935",
+        "description": "Windows NT 3.51 Workstation (1995).",
+    },
+    "winnt4": {
+        "name": "Windows NT 4.0",
+        "cycles": 50000,
+        "ram_mb": 64,
+        "disk_mb": 500,
+        "media_type": "cdrom",
+        "cpu": "pentium",
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Boot Floppy"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+            {"letter": "D", "type": "cdrom",  "label": "CD-ROM"},
+        ],
+        "disks": [
+            {"label": "Install CD", "file": "winnt4.iso",
+             "url": "https://archive.org/download/WindowsNTWorkstation4_201708/Windows%20NT%204.iso",
+             "min_size_mb": 400},
+        ],
+        "boot_cdrom": "winnt4.iso",
+        "archive_id": "WindowsNTWorkstation4_201708",
+        "description": "Windows NT 4.0 Workstation (1996).",
+    },
+    "win2000": {
+        "name": "Windows 2000",
+        "cycles": 100000,
+        "ram_mb": 128,
+        "disk_mb": 2000,
+        "media_type": "cdrom",
+        "cpu": "pentium",
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Boot Floppy"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+            {"letter": "D", "type": "cdrom",  "label": "CD-ROM"},
+        ],
+        "disks": [
+            {"label": "Install CD", "file": "win2000.iso",
+             "url": "https://archive.org/download/win2kproiso/Windows%202000%20Professional.ISO",
+             "min_size_mb": 300},
+        ],
+        "boot_cdrom": "win2000.iso",
+        "archive_id": "win2kproiso",
+        "description": "Windows 2000 Professional (2000).",
+    },
+    "winxp": {
+        "name": "Windows XP",
+        "cycles": 200000,
+        "ram_mb": 256,
+        "disk_mb": 4000,
+        "media_type": "cdrom",
+        "cpu": "pentium",
+        "drives": [
+            {"letter": "C", "type": "hdd",   "label": "Hard Disk"},
+            {"letter": "D", "type": "cdrom", "label": "CD-ROM"},
+        ],
+        "disks": [
+            {"label": "Install CD (SP3)", "file": "winxp.iso",
+             "url": "https://archive.org/download/XPPRO_SP3_ENU/en_windows_xp_professional_with_service_pack_3_x86_cd_vl_x14-73974.iso",
+             "min_size_mb": 400},
+        ],
+        "boot_cdrom": "winxp.iso",
+        "archive_id": "XPPRO_SP3_ENU",
+        "description": "Windows XP Professional SP3 (2001). Boots from CD.",
+    },
+    "win95": {
+        "name": "Windows 95",
+        "cycles": 50000,
+        "ram_mb": 64,
+        "disk_mb": 500,
+        "media_type": "cdrom",
+        "cpu": "pentium",
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Boot Floppy"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+            {"letter": "D", "type": "cdrom",  "label": "CD-ROM"},
+        ],
+        "disks": [
+            {"label": "Install CD", "file": "win95.iso",
+             "url": "https://archive.org/download/win-95-osr-2/Win95%20OSR2.ISO",
+             "min_size_mb": 400},
+        ],
+        "boot_cdrom": "win95.iso",
+        "archive_id": "win-95-osr-2",
+        "description": "Windows 95 OSR2. Boots from CD-ROM.",
+    },
+    "win98": {
+        "name": "Windows 98 SE",
+        "cycles": 100000,
+        "ram_mb": 64,
+        "disk_mb": 800,
+        "media_type": "cdrom",
+        "cpu": "pentium",
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Boot Floppy"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+            {"letter": "D", "type": "cdrom",  "label": "CD-ROM"},
+        ],
+        "disks": [
+            {"label": "Install CD", "file": "win98se.iso",
+             "url": "https://archive.org/download/win98se_202001/WIN98_SE.ISO",
+             "min_size_mb": 400},
+        ],
+        "boot_cdrom": "win98se.iso",
+        "archive_id": "win98se_202001",
+        "description": "Windows 98 Second Edition.",
+    },
+    "freedos": {
+        "name": "FreeDOS 1.3",
+        "cycles": 3000,
+        "ram_mb": 16,
+        "disk_mb": 40,
+        "media_type": "cdrom",
+        "cpu": "386",
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Boot Floppy"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+            {"letter": "D", "type": "cdrom",  "label": "CD-ROM"},
+        ],
+        "disks": [
+            {"label": "Install CD (zip)", "file": "FD13-LiteUSB.zip",
+             "url": "https://archive.org/download/freedos-1.3/FD13-LiteUSB.zip"},
+        ],
+        "boot_cdrom": "FD13-LiteUSB.zip",
+        "archive_id": "freedos-1.3",
+        "description": "FreeDOS 1.3 – free, open-source DOS. Fully legal to download.",
+    },
+    "pcdos_700": {
+        "name": "PC-DOS 7.00",
+        "cycles": 3000,
+        "ram_mb": 16,
+        "disk_mb": 40,
+        "media_type": "floppy",
+        "cpu": "386",
+        "drives": [
+            {"letter": "A", "type": "floppy", "label": "Boot Floppy"},
+            {"letter": "C", "type": "hdd",    "label": "Hard Disk"},
+        ],
+        "disks": [
+            {"label": "Disk 1 (Boot)", "file": "msdos622_disk1.img",
+             "url": "https://archive.org/download/msdos-622/dos-622-disk1.img"},
+            {"label": "Disk 2",        "file": "msdos622_disk2.img",
+             "url": "https://archive.org/download/msdos-622/dos-622-disk2.img"},
+            {"label": "Disk 3",        "file": "msdos622_disk3.img",
+             "url": "https://archive.org/download/msdos-622/dos-622-disk3.img"},
+        ],
+        "boot_disk": "msdos622_disk1.img",
+        "archive_id": "msdos-622",
+        "description": "IBM PC-DOS 7.00 (uses MS-DOS 6.22 disks as fallback).",
+    },
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Settings / Machine persistence
+# ─────────────────────────────────────────────────────────────────────────────
+def load_machines():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    if MACHINES_FILE.exists():
+        try:
+            return json.loads(MACHINES_FILE.read_text())
+        except Exception:
+            pass
+    return []
+
+def save_machines(machines):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    MACHINES_FILE.write_text(json.dumps(machines, indent=2))
+
+def new_machine(dos_key):
+    db = DOS_DB[dos_key]
+    return {
+        "id":       hashlib.md5(f"{dos_key}{time.time()}".encode()).hexdigest()[:8],
+        "dos_key":  dos_key,
+        "name":     db["name"],
+        "cycles":   db["cycles"],
+        "ram_mb":   db["ram_mb"],
+        "disk_mb":  db["disk_mb"],
+        "cpu":      db["cpu"],
+        "hdd_path": "",
+        "media":    {},   # letter -> path
+        "created":  datetime.now().isoformat(),
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DOSBox config generator
+# ─────────────────────────────────────────────────────────────────────────────
+# QEMU launcher  (replaces DOSBox)
+# ─────────────────────────────────────────────────────────────────────────────
+QEMU_BIN = shutil.which("qemu-system-i386") or shutil.which("qemu-system-x86_64") or "qemu-system-i386"
+
+def get_qemu_args(machine):
+    """Build QEMU command-line args for a machine, return (args, hdd_path, monitor_sock)."""
+    db       = DOS_DB[machine["dos_key"]]
+    media_dir = MEDIA_DIR / machine["id"]
+    dos_key  = machine["dos_key"]
+
+    # ── Validate media files — delete partial ISOs only ────────────────────
+    for disk in db.get("disks", []):
+        path = media_dir / disk["file"]
+        min_mb = disk.get("min_size_mb", 0)
+        ext = path.suffix.lower()
+        # Only auto-delete partial ISOs — never delete floppy images
+        if ext not in (".iso", ".bin") :
+            continue
+        if path.exists():
+            size_mb = path.stat().st_size / (1024 * 1024)
+            if min_mb == 0:
+                min_mb = 10  # ISOs under 10 MB are definitely partial
+            if min_mb and size_mb < min_mb:
+                log(f"Partial ISO ({size_mb:.1f} MB < {min_mb} MB): {path} — deleting")
+                path.unlink()
+                log(f"Deleted partial ISO: {path.name}")
+
+    # ── HDD image ──────────────────────────────────────────────────────────
+    hdd_path = machine.get("hdd_path", "")
+    if not hdd_path:
+        hdd_path = str(CONFIG_DIR / f"hdd_{machine['id']}.qcow2")
+        machine["hdd_path"] = hdd_path
+    # Convert old raw .img to qcow2 if needed
+    if hdd_path.endswith(".img") and os.path.exists(hdd_path):
+        new_path = hdd_path.replace(".img", ".qcow2")
+        if not os.path.exists(new_path):
+            log(f"Converting raw HDD to qcow2: {new_path}")
+            subprocess.run(["qemu-img", "convert", "-f", "raw", "-O", "qcow2",
+                            hdd_path, new_path], check=True)
+        hdd_path = new_path
+        machine["hdd_path"] = hdd_path
+    if not os.path.exists(hdd_path):
+        log(f"Creating QEMU HDD: {hdd_path} ({machine['disk_mb']} MB)")
+        subprocess.run([
+            "qemu-img", "create", "-f", "qcow2",
+            hdd_path, f"{machine['disk_mb']}M"
+        ], check=True)
+        log("HDD created OK")
+
+    # ── Monitor socket ─────────────────────────────────────────────────────
+    monitor_sock = str(CONFIG_DIR / f"monitor_{machine['id']}.sock")
+    if os.path.exists(monitor_sock):
+        os.unlink(monitor_sock)
+
+    # ── Boot media ─────────────────────────────────────────────────────────
+    boot_disk  = db.get("boot_disk", "")
+    boot_cdrom = db.get("boot_cdrom", "")
+    boot_disk_path  = str(media_dir / boot_disk)  if boot_disk  else ""
+    boot_cdrom_path = str(media_dir / boot_cdrom) if boot_cdrom else ""
+
+    # ── CPU / machine type ─────────────────────────────────────────────────
+    cpu_map = {
+        "286":     "base",
+        "386":     "486",
+        "486":     "486",
+        "pentium": "pentium",
+    }
+    cpu = cpu_map.get(db.get("cpu", "386"), "486")
+
+    # Use x86_64 for high-RAM machines (NT4, 2000, XP)
+    qemu_bin = QEMU_BIN
+    if machine["ram_mb"] >= 128:
+        qemu_bin = shutil.which("qemu-system-x86_64") or QEMU_BIN
+
+    args = [
+        qemu_bin,
+        "-name",    machine["name"],
+        "-cpu",     cpu,
+        "-m",       str(machine["ram_mb"]),
+        "-machine", "pc",
+        # HDD as primary IDE master (ide bus 0, unit 0)
+        "-drive",   f"file={hdd_path},format=qcow2,if=ide,index=0,media=disk",
+        # Display — close-to-hide so closing window goes through our handler
+        "-display", "gtk,window-close=off",
+        # Monitor socket
+        "-monitor", f"unix:{monitor_sock},server,nowait",
+        "-nodefaults",
+        "-vga", "cirrus",
+        # Serial mouse on COM1 — works with Windows 1.0/2.0/3.x
+        "-device", "isa-serial,chardev=mouse",
+        "-chardev", "msmouse,id=mouse",
+        # USB tablet for modern OSes (Win95+)
+        "-device", "usb-ehci",
+        "-device", "usb-tablet",
+    ]
+
+    # ── CD-ROM as secondary IDE master (index=2 = ide bus 1, unit 0) ───────
+    if boot_cdrom_path and os.path.exists(boot_cdrom_path):
+        args += ["-drive",
+                 f"file={boot_cdrom_path},format=raw,if=ide,index=2,media=cdrom"]
+
+    # ── Floppy ──────────────────────────────────────────────────────────────
+    if boot_disk_path and os.path.exists(boot_disk_path):
+        args += ["-drive", f"file={boot_disk_path},format=raw,if=floppy,index=0"]
+
+    # Add second floppy drive if machine has B: drive
+    has_b_drive = any(d["letter"] == "B" and d["type"] == "floppy"
+                      for d in db.get("drives", []))
+    if has_b_drive:
+        # Create a blank B: floppy image if needed
+        b_img = str(CONFIG_DIR / f"floppy_b_{machine['id']}.img")
+        if not os.path.exists(b_img):
+            create_blank_floppy(b_img, 1_474_560, "")
+        args += ["-drive", f"file={b_img},format=raw,if=floppy,index=1"]
+
+    # ── Boot order ──────────────────────────────────────────────────────────
+    if boot_disk_path and os.path.exists(boot_disk_path):
+        args += ["-boot", "order=adc"]   # floppy → cdrom → hdd
+    elif boot_cdrom_path and os.path.exists(boot_cdrom_path):
+        args += ["-boot", "order=dc"]    # cdrom → hdd
+    else:
+        args += ["-boot", "order=c"]     # hdd only
+
+    return args, hdd_path, monitor_sock
+
+
+def _has_saved_state(hdd_path):
+    """Check if a qcow2 image has a saved VM snapshot called mattech_autosave."""
+    try:
+        r = subprocess.run(
+            ["qemu-img", "snapshot", "-l", hdd_path],
+            capture_output=True, text=True)
+        return "mattech_autosave" in r.stdout
+    except Exception:
+        return False
+
+
+def qemu_monitor_cmd(monitor_sock, cmd, timeout=2):
+    """Send a command to QEMU monitor via unix socket."""
+    import socket as _socket
+    try:
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(monitor_sock)
+        s.recv(4096)  # greeting
+        s.sendall((cmd + "\n").encode())
+        time.sleep(0.1)
+        try:
+            resp = s.recv(4096).decode(errors="replace")
+        except Exception:
+            resp = ""
+        s.close()
+        log(f"QEMU monitor [{cmd}] → {resp.strip()[:80]}")
+        return resp
+    except Exception as ex:
+        log(f"QEMU monitor error ({cmd}): {ex}")
+        return ""
+
+
+def qemu_swap_floppy(monitor_sock, drive_letter, image_path):
+    """Hot-swap a floppy image in QEMU via monitor."""
+    # QEMU names floppy drives as 'floppy0', 'floppy1'
+    # but the block device node is 'drive-floppy0' in newer QEMU
+    drive_id = "floppy0" if drive_letter.upper() == "A" else "floppy1"
+    if image_path and os.path.exists(image_path):
+        # Try both naming conventions
+        r = qemu_monitor_cmd(monitor_sock, f"eject -f {drive_id}")
+        if "unknown" in r.lower() or "error" in r.lower():
+            qemu_monitor_cmd(monitor_sock, f"eject -f drive-{drive_id}")
+        time.sleep(0.3)
+        r = qemu_monitor_cmd(monitor_sock, f"change {drive_id} \"{image_path}\"")
+        if "unknown" in r.lower() or "error" in r.lower():
+            qemu_monitor_cmd(monitor_sock, f"change drive-{drive_id} \"{image_path}\"")
+    else:
+        qemu_monitor_cmd(monitor_sock, f"eject -f {drive_id}")
+
+
+def qemu_swap_cdrom(monitor_sock, image_path):
+    """Hot-swap a CD-ROM image in QEMU via monitor."""
+    if image_path and os.path.exists(image_path):
+        qemu_monitor_cmd(monitor_sock, "eject -f ide1-cd0")
+        time.sleep(0.3)
+        qemu_monitor_cmd(monitor_sock, f"change ide1-cd0 \"{image_path}\"")
+    else:
+        qemu_monitor_cmd(monitor_sock, "eject -f ide1-cd0")
+
+
+def qemu_shutdown(monitor_sock):
+    """Save VM state then send ACPI shutdown."""
+    qemu_monitor_cmd(monitor_sock, "savevm mattech_autosave")
+    time.sleep(1)
+    qemu_monitor_cmd(monitor_sock, "system_powerdown")
+
+
+def qemu_stop(monitor_sock):
+    """Force-quit QEMU."""
+    qemu_monitor_cmd(monitor_sock, "quit")
+
+
+def create_blank_floppy(path: str, size_bytes: int, vol_label: str = ""):
+    """Create a blank floppy image.
+    If vol_label is empty, writes all zeros (unformatted) so installers
+    that want to format it themselves will accept it.
+    If vol_label is set, writes a proper FAT12 filesystem.
+    """
+    buf = bytearray(size_bytes)  # all zeros by default
+
+    if vol_label:
+        # Full FAT12 format with label
+        if size_bytes == 1_474_560:
+            spt, heads, total, spf, media = 18, 2, 2880, 9, 0xF0
+        elif size_bytes == 1_228_800:
+            spt, heads, total, spf, media = 15, 2, 2400, 7, 0xF9
+        elif size_bytes == 737_280:
+            spt, heads, total, spf, media = 9,  2, 1440, 3, 0xF9
+        else:
+            spt, heads, total, spf, media = 9,  2,  720, 2, 0xFD
+        root_entries = 224 if size_bytes >= 1_228_800 else 112
+        buf[0:3]  = b"\xeb\x3c\x90"
+        buf[3:11] = b"MSDOS5.0"
+        struct.pack_into("<H", buf, 11, 512)
+        buf[13]   = 1
+        struct.pack_into("<H", buf, 14, 1)
+        buf[16]   = 2
+        struct.pack_into("<H", buf, 17, root_entries)
+        struct.pack_into("<H", buf, 19, total)
+        buf[21]   = media
+        struct.pack_into("<H", buf, 22, spf)
+        struct.pack_into("<H", buf, 24, spt)
+        struct.pack_into("<H", buf, 26, heads)
+        buf[36]   = 0x29
+        buf[37:41] = b'\x01\x02\x03\x04'
+        label_bytes = vol_label.upper().encode("ascii", errors="replace")[:11].ljust(11, b" ")
+        buf[43:54] = label_bytes
+        buf[54:62] = b"FAT12   "
+        buf[510]  = 0x55
+        buf[511]  = 0xAA
+        fat1_off = 512
+        buf[fat1_off]   = media; buf[fat1_off+1] = 0xFF; buf[fat1_off+2] = 0xFF
+        fat2_off = 512 + spf * 512
+        buf[fat2_off]   = media; buf[fat2_off+1] = 0xFF; buf[fat2_off+2] = 0xFF
+        root_off = 512 + spf * 512 * 2
+        entry = bytearray(32)
+        entry[0:11] = label_bytes
+        entry[11]   = 0x08
+        buf[root_off:root_off+32] = entry
+
+    with open(path, "wb") as f:
+        f.write(buf)
+
+
+def create_blank_cdrom(path: str, size_mb: int, vol_label: str = "BLANK_CD"):
+    """Create a blank ISO 9660 image using genisoimage or mkisofs.
+    Falls back to a zero-filled raw ISO if neither tool is available."""
+    label = vol_label.upper()[:32] or "BLANK_CD"
+    # Try genisoimage first, then mkisofs
+    tool = shutil.which("genisoimage") or shutil.which("mkisofs")
+    if tool:
+        # Create a temp empty dir to make an empty ISO from
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subprocess.run([
+                tool,
+                "-o", path,
+                "-V", label,
+                "-J", "-r",
+                "-quiet",
+                tmpdir
+            ], check=True)
+        log(f"Blank CD created with {tool}: {path}")
+    else:
+        # Fallback: write a minimal ISO 9660 header + zeros
+        size_bytes = size_mb * 1024 * 1024
+        buf = bytearray(size_bytes)
+        # ISO 9660 Primary Volume Descriptor at sector 16 (offset 32768)
+        pvd_off = 16 * 2048
+        buf[pvd_off]      = 1          # type: Primary Volume Descriptor
+        buf[pvd_off+1:pvd_off+6] = b"CD001"  # identifier
+        buf[pvd_off+6]    = 1          # version
+        # Volume identifier (32 bytes, space-padded)
+        lbl = label.encode("ascii", errors="replace")[:32].ljust(32, b" ")
+        buf[pvd_off+40:pvd_off+72] = lbl
+        # Volume Set Terminator at sector 17
+        vst_off = 17 * 2048
+        buf[vst_off]      = 255        # type: Volume Descriptor Set Terminator
+        buf[vst_off+1:vst_off+6] = b"CD001"
+        buf[vst_off+6]    = 1
+        with open(path, "wb") as f:
+            f.write(buf)
+        log(f"Blank CD created (raw fallback): {path}")
+
+
+def fat12_write_file(floppy_path: str, filename: str, data: bytes):
+    """Write a single file into a FAT12 1.44MB floppy image using pure Python."""
+    # FAT12 1.44MB geometry
+    SECTOR = 512
+    SPF    = 9    # sectors per FAT
+    NFATS  = 2
+    NROOT  = 224  # root directory entries
+    TOTAL  = 2880
+
+    # Create blank floppy first
+    create_blank_floppy(floppy_path, 1_474_560, "MOUSE     ")
+
+    with open(floppy_path, "r+b") as f:
+        img = bytearray(f.read())
+
+    # FAT starts at sector 1
+    fat_off = SECTOR
+    # Root dir starts after both FATs
+    root_off = SECTOR + SPF * SECTOR * NFATS
+    # Data area starts after root dir
+    data_off = root_off + NROOT * 32
+
+    # Pad/truncate filename to 8.3
+    name = filename.upper().replace(".", "")
+    ext  = ""
+    if "." in filename:
+        parts = filename.upper().split(".")
+        name = parts[0][:8].ljust(8)
+        ext  = parts[1][:3].ljust(3) if len(parts) > 1 else "   "
+    else:
+        name = name[:8].ljust(8)
+        ext  = "   "
+    dir_name = (name + ext).encode("ascii")
+
+    # Find first free cluster (cluster 2 = first data cluster)
+    start_cluster = 2
+    file_size = len(data)
+    clusters_needed = max(1, (file_size + SECTOR - 1) // SECTOR)
+
+    # Write data into sectors starting at cluster 2
+    for i in range(clusters_needed):
+        sector_idx = (start_cluster - 2) + i
+        offset = data_off + sector_idx * SECTOR
+        chunk = data[i*SECTOR:(i+1)*SECTOR]
+        chunk = chunk.ljust(SECTOR, b'\x00')
+        img[offset:offset+SECTOR] = chunk
+
+    # Update FAT1 and FAT2 — mark clusters as used
+    def set_fat12(fat_area, cluster, value):
+        idx = cluster + (cluster // 2)
+        if cluster % 2 == 0:
+            fat_area[idx]     = value & 0xFF
+            fat_area[idx + 1] = (fat_area[idx + 1] & 0xF0) | ((value >> 8) & 0x0F)
+        else:
+            fat_area[idx]     = (fat_area[idx] & 0x0F) | ((value & 0x0F) << 4)
+            fat_area[idx + 1] = (value >> 4) & 0xFF
+
+    for fat_start in [fat_off, fat_off + SPF * SECTOR]:
+        fat = bytearray(img[fat_start:fat_start + SPF * SECTOR])
+        for i in range(clusters_needed - 1):
+            set_fat12(fat, start_cluster + i, start_cluster + i + 1)
+        set_fat12(fat, start_cluster + clusters_needed - 1, 0xFFF)  # EOF
+        img[fat_start:fat_start + SPF * SECTOR] = fat
+
+    # Write root directory entry
+    entry = bytearray(32)
+    entry[0:11]  = dir_name
+    entry[11]    = 0x20  # archive attribute
+    entry[26:28] = struct.pack("<H", start_cluster)
+    entry[28:32] = struct.pack("<I", file_size)
+    img[root_off:root_off + 32] = entry
+
+    with open(floppy_path, "wb") as f:
+        f.write(img)
+    log(f"fat12_write_file: wrote {filename} ({file_size} bytes) to {floppy_path}")
+
+
+def create_hdd_image(path, size_mb):
+    """Create a QEMU qcow2 HDD image (wrapper for backward compat)."""
+    subprocess.run(["qemu-img", "create", "-f", "qcow2", path, f"{size_mb}M"], check=True)
+    log(f"HDD image created: {path} ({size_mb} MB)")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Download helpers
+# ─────────────────────────────────────────────────────────────────────────────
+ARCHIVE_SEARCH = "https://archive.org/advancedsearch.php?q={query}&fl[]=identifier&fl[]=title&output=json&rows=5"
+
+def search_archive(query):
+    """Return list of (identifier, title) from archive.org search."""
+    url = ARCHIVE_SEARCH.format(query=urllib.parse.quote(query))
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.loads(r.read())
+        docs = data.get("response", {}).get("docs", [])
+        return [(d.get("identifier",""), d.get("title","")) for d in docs]
+    except Exception:
+        return []
+
+def get_archive_files(identifier):
+    """Return list of file dicts for an archive.org item."""
+    url = f"https://archive.org/metadata/{identifier}/files"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.loads(r.read())
+        return data.get("result", [])
+    except Exception:
+        return []
+
+def download_file(url, dest_path, progress_cb=None):
+    """Download url to dest_path, calling progress_cb(fraction) periodically."""
+    dest_path = Path(dest_path)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; MatTechDOS/1.0)"
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            total = int(r.headers.get("Content-Length", 0))
+            downloaded = 0
+            with open(dest_path, "wb") as f:
+                while True:
+                    chunk = r.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_cb and total:
+                        progress_cb(downloaded / total)
+        return True
+    except Exception as ex:
+        if dest_path.exists():
+            dest_path.unlink()
+        raise ex
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# New Machine Wizard
+# ─────────────────────────────────────────────────────────────────────────────
+class NewMachineDialog(Gtk.Dialog):
+    def __init__(self, parent):
+        super().__init__(title="Create New DOS Machine", transient_for=parent, flags=0)
+        self.set_default_size(520, 480)
+        self.set_resizable(False)
+        self.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                         "Create", Gtk.ResponseType.OK)
+        self.set_default_response(Gtk.ResponseType.OK)
+
+        box = self.get_content_area()
+        box.set_spacing(0)
+
+        # Header bar
+        hdr = Gtk.Box()
+        hdr.set_size_request(-1, 60)
+        # Use CSS instead of deprecated override_background_color
+        css = b"box { background-color: #1a4d99; }"
+        provider = Gtk.CssProvider()
+        provider.load_from_data(css)
+        hdr.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        lbl = Gtk.Label()
+        lbl.set_markup('<span color="white" size="large" weight="bold">'
+                       '  Create New DOS Machine</span>')
+        lbl.set_halign(Gtk.Align.START)
+        hdr.pack_start(lbl, True, True, 12)
+        box.pack_start(hdr, False, False, 0)
+
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        inner.set_margin_top(16); inner.set_margin_bottom(16)
+        inner.set_margin_start(16); inner.set_margin_end(16)
+        box.pack_start(inner, True, True, 0)
+
+        # Name
+        row = Gtk.Box(spacing=8)
+        row.pack_start(Gtk.Label(label="Name:", xalign=1, width_chars=14), False, False, 0)
+        self._name_entry = Gtk.Entry()
+        self._name_entry.set_hexpand(True)
+        row.pack_start(self._name_entry, True, True, 0)
+        inner.pack_start(row, False, False, 0)
+
+        # DOS Version picker
+        row2 = Gtk.Box(spacing=8)
+        row2.pack_start(Gtk.Label(label="DOS Version:", xalign=1, width_chars=14), False, False, 0)
+        self._dos_combo = Gtk.ComboBoxText()
+        self._dos_keys = list(DOS_DB.keys())
+        for k in self._dos_keys:
+            self._dos_combo.append_text(DOS_DB[k]["name"])
+        self._dos_combo.set_active(0)
+        self._dos_combo.connect("changed", self._on_dos_changed)
+        row2.pack_start(self._dos_combo, True, True, 0)
+        inner.pack_start(row2, False, False, 0)
+
+        # Auto-detected specs frame
+        specs_frame = Gtk.Frame(label="  Auto-Detected Requirements  ")
+        specs_grid = Gtk.Grid()
+        specs_grid.set_row_spacing(6); specs_grid.set_column_spacing(12)
+        specs_grid.set_margin_top(8); specs_grid.set_margin_bottom(8)
+        specs_grid.set_margin_start(8); specs_grid.set_margin_end(8)
+
+        def spec_row(grid, r, label):
+            lbl = Gtk.Label(label=label + ":", xalign=1)
+            lbl.set_width_chars(14)
+            grid.attach(lbl, 0, r, 1, 1)
+            val = Gtk.Label(label="—", xalign=0)
+            val.set_hexpand(True)
+            grid.attach(val, 1, r, 1, 1)
+            return val
+
+        self._lbl_cpu    = spec_row(specs_grid, 0, "CPU")
+        self._lbl_ram    = spec_row(specs_grid, 1, "RAM")
+        self._lbl_disk   = spec_row(specs_grid, 2, "Disk Space")
+        self._lbl_cycles = spec_row(specs_grid, 3, "DOSBox Cycles")
+        self._lbl_media  = spec_row(specs_grid, 4, "Install Media")
+        specs_frame.add(specs_grid)
+        inner.pack_start(specs_frame, False, False, 0)
+
+        # Description
+        self._desc_lbl = Gtk.Label(label="", xalign=0)
+        self._desc_lbl.set_line_wrap(True)
+        self._desc_lbl.set_max_width_chars(55)
+        inner.pack_start(self._desc_lbl, False, False, 0)
+
+        # Separator
+        inner.pack_start(Gtk.Separator(), False, False, 4)
+
+        # Download media checkbox
+        self._dl_check = Gtk.CheckButton(
+            label="Automatically download installation media from archive.org")
+        self._dl_check.set_active(True)
+        inner.pack_start(self._dl_check, False, False, 0)
+
+        self._update_specs()
+        self.show_all()
+
+    def _on_dos_changed(self, _combo):
+        self._update_specs()
+
+    def _update_specs(self):
+        key = self._dos_keys[self._dos_combo.get_active()]
+        db  = DOS_DB[key]
+        self._lbl_cpu.set_text(db["cpu"].upper())
+        self._lbl_ram.set_text(f"{db['ram_mb']} MB")
+        self._lbl_disk.set_text(f"{db['disk_mb']} MB")
+        self._lbl_cycles.set_text(str(db["cycles"]))
+        self._lbl_media.set_text(db["media_type"].upper())
+        self._desc_lbl.set_text(db["description"])
+        if not self._name_entry.get_text():
+            self._name_entry.set_text(db["name"])
+
+    @property
+    def machine_name(self):
+        return self._name_entry.get_text().strip() or DOS_DB[self.dos_key]["name"]
+
+    @property
+    def dos_key(self):
+        return self._dos_keys[self._dos_combo.get_active()]
+
+    @property
+    def auto_download(self):
+        return self._dl_check.get_active()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Download Progress Dialog
+# ─────────────────────────────────────────────────────────────────────────────
+class DownloadDialog(Gtk.Dialog):
+    def __init__(self, parent, machine):
+        super().__init__(title="Downloading Installation Media", transient_for=parent, flags=0)
+        self.set_default_size(480, 220)
+        self.set_resizable(False)
+        self._machine = machine
+        self._cancelled = False
+        self._results = {}   # disk_file -> local_path or None
+
+        self.add_button("Cancel", Gtk.ResponseType.CANCEL)
+
+        box = self.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_top(16); box.set_margin_bottom(16)
+        box.set_margin_start(16); box.set_margin_end(16)
+
+        self._title_lbl = Gtk.Label(xalign=0)
+        self._title_lbl.set_markup(
+            f'<b>Downloading media for {machine["name"]}</b>')
+        box.pack_start(self._title_lbl, False, False, 0)
+
+        self._file_lbl = Gtk.Label(label="Searching archive.org…", xalign=0)
+        box.pack_start(self._file_lbl, False, False, 0)
+
+        self._progress = Gtk.ProgressBar()
+        self._progress.set_show_text(True)
+        box.pack_start(self._progress, False, False, 0)
+
+        self._log = Gtk.TextView()
+        self._log.set_editable(False)
+        self._log.set_cursor_visible(False)
+        self._log.set_wrap_mode(Gtk.WrapMode.WORD)
+        sw = Gtk.ScrolledWindow()
+        sw.set_size_request(-1, 80)
+        sw.add(self._log)
+        box.pack_start(sw, True, True, 0)
+
+        self.show_all()
+        self.connect("response", self._on_response)
+
+        # Start download thread
+        t = threading.Thread(target=self._download_thread, daemon=True)
+        t.start()
+
+    def _on_response(self, _dlg, resp):
+        if resp == Gtk.ResponseType.CANCEL:
+            self._cancelled = True
+
+    def _log_msg(self, msg):
+        def _do():
+            buf = self._log.get_buffer()
+            buf.insert(buf.get_end_iter(), msg + "\n")
+        GLib.idle_add(_do)
+
+    def _set_progress(self, fraction, text=""):
+        def _do():
+            self._progress.set_fraction(min(fraction, 1.0))
+            if text:
+                self._progress.set_text(text)
+        GLib.idle_add(_do)
+
+    def _set_file_label(self, text):
+        GLib.idle_add(self._file_lbl.set_text, text)
+
+    def _download_thread(self):
+        db = DOS_DB[self._machine["dos_key"]]
+        disks = db.get("disks", [])
+        archive_id = db.get("archive_id", "")
+        total = len(disks)
+
+        log(f"=== Download start: {self._machine['name']} ===")
+
+        # Fetch archive.org file listing
+        archive_files = {}
+        if archive_id:
+            log(f"Fetching listing: archive.org/{archive_id}")
+            self._log_msg(f"Fetching file list from archive.org…")
+            files = get_archive_files(archive_id)
+            for f in files:
+                archive_files[f.get("name","").lower()] = f.get("name","")
+            log(f"Listing has {len(archive_files)} files: {list(archive_files.keys())[:10]}")
+            self._log_msg(f"Found {len(archive_files)} files on archive.org")
+
+        for i, disk in enumerate(disks):
+            if self._cancelled:
+                break
+            fname = disk["file"]
+            dest  = MEDIA_DIR / self._machine["id"] / fname
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+            if dest.exists() and dest.stat().st_size > 1024:
+                # Check minimum expected size if specified
+                min_size = disk.get("min_size_mb", 0) * 1024 * 1024
+                if min_size and dest.stat().st_size < min_size:
+                    log(f"File too small ({dest.stat().st_size} bytes, expected >{min_size}), re-downloading: {fname}")
+                    dest.unlink()
+                else:
+                    log(f"Already have: {fname}")
+                    self._log_msg(f"✓ Already have: {fname}")
+                    self._results[fname] = str(dest)
+                    self._set_progress((i + 1) / total, f"{i+1}/{total}")
+                    continue
+
+            self._set_file_label(f"Downloading: {disk['label']} ({fname})")
+
+            # Handle create_blank entries
+            if disk.get("create_blank"):
+                log(f"Creating blank disk: {fname}")
+                self._set_file_label(f"Creating blank disk: {disk['label']}")
+                create_blank_floppy(str(dest), 1_474_560, "")
+                log(f"OK: blank disk created at {dest}")
+                self._log_msg(f"✓ Created blank: {fname}")
+                self._results[fname] = str(dest)
+                self._set_progress((i + 1) / total, f"{i+1}/{total}")
+                continue
+
+            # 1. Direct URL from database
+            url = disk.get("url", "")
+            log(f"Direct URL for {fname}: '{url}'")
+
+            # 2. Fallback: search archive.org listing
+            if not url and archive_id and archive_files:
+                stem = Path(fname).stem.lower()
+                ext  = Path(fname).suffix.lower()
+                for af_lower, af_real in archive_files.items():
+                    if ext in af_lower and stem in af_lower:
+                        url = f"https://archive.org/download/{archive_id}/{af_real}"
+                        log(f"Found via listing: {url}")
+                        break
+
+            if not url:
+                log(f"ERROR: No URL for {fname}")
+                self._log_msg(f"✗ No URL found for {fname}")
+                self._results[fname] = None
+                self._set_progress((i + 1) / total)
+                continue
+
+            log(f"Downloading: {url}")
+            self._log_msg(f"→ {url}")
+            try:
+                def prog(frac, idx=i, tot=total):
+                    self._set_progress((idx + frac) / tot,
+                                       f"{idx+1}/{tot} – {int(frac*100)}%")
+                download_file(url, dest, prog)
+                log(f"OK: {fname} -> {dest} ({dest.stat().st_size} bytes)")
+                self._results[fname] = str(dest)
+                self._log_msg(f"✓ Saved: {fname}")
+            except Exception as ex:
+                log(f"FAILED {fname}: {ex}")
+                self._log_msg(f"✗ Failed ({fname}): {ex}")
+                self._results[fname] = None
+
+            self._set_progress((i + 1) / total, f"{i+1}/{total}")
+            # Pause between files to avoid archive.org rate limiting
+            if i < total - 1 and not self._cancelled:
+                time.sleep(3)
+
+        log("=== Download thread done ===")
+
+        def _finish():
+            self._progress.set_fraction(1.0)
+            self._progress.set_text("Done")
+            self._file_lbl.set_text(
+                f"Done. Log: {LOG_FILE}")
+            GLib.timeout_add(2000, lambda: self.response(Gtk.ResponseType.OK))
+        GLib.idle_add(_finish)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Insert Media Dialog  (pick a disk image for a specific drive)
+# ─────────────────────────────────────────────────────────────────────────────
+class InsertMediaDialog(Gtk.Dialog):
+    def __init__(self, parent, machine, drive_letter, drive_type):
+        title = f"Insert {'CD-ROM' if drive_type=='cdrom' else 'Floppy'} – Drive {drive_letter}:"
+        super().__init__(title=title, transient_for=parent, flags=0)
+        self.set_default_size(560, 400)
+        self.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                         "Insert", Gtk.ResponseType.OK)
+        self._selected_path = ""
+        self._machine = machine
+        self._drive_type = drive_type
+
+        box = self.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_top(12); box.set_margin_bottom(12)
+        box.set_margin_start(12); box.set_margin_end(12)
+
+        box.pack_start(Gtk.Label(
+            label=f"Select an image to insert into drive {drive_letter}:",
+            xalign=0), False, False, 0)
+
+        # Tabs: Known disks | Browse
+        nb = Gtk.Notebook()
+        box.pack_start(nb, True, True, 0)
+
+        # ── Tab 1: Known disks for this machine ──
+        known_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        known_box.set_margin_top(8)
+
+        db = DOS_DB[machine["dos_key"]]
+        self._known_store = Gtk.ListStore(str, str, str)  # label, file, full_path
+        tv = Gtk.TreeView(model=self._known_store)
+        tv.set_headers_visible(True)
+        tv.get_selection().connect("changed", self._on_known_sel)
+        tv.connect("row-activated", lambda *_: self.response(Gtk.ResponseType.OK))
+
+        for i, (col, w) in enumerate([("Disk", 180), ("File", 200), ("Status", 100)]):
+            r = Gtk.CellRendererText()
+            c = Gtk.TreeViewColumn(col, r, text=i)
+            c.set_min_width(w)
+            tv.append_column(c)
+
+        media_dir = MEDIA_DIR / machine["id"]
+        for disk in db.get("disks", []):
+            full = str(media_dir / disk["file"])
+            status = "✓ Ready" if os.path.exists(full) else "✗ Not downloaded"
+            self._known_store.append([disk["label"], disk["file"], status])
+            # store full path as hidden data
+            self._known_store[-1]  # just appended
+
+        # We need full paths separately
+        self._known_paths = []
+        for disk in db.get("disks", []):
+            self._known_paths.append(str(media_dir / disk["file"]))
+
+        sw = Gtk.ScrolledWindow()
+        sw.add(tv)
+        known_box.pack_start(sw, True, True, 0)
+        nb.append_page(known_box, Gtk.Label(label="Known Disks"))
+
+        # ── Tab 2: Browse filesystem ──
+        browse_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        browse_box.set_margin_top(8)
+
+        path_row = Gtk.Box(spacing=6)
+        self._browse_entry = Gtk.Entry()
+        self._browse_entry.set_hexpand(True)
+        self._browse_entry.set_placeholder_text("Path to .img / .iso / .ima file…")
+        self._browse_entry.connect("changed", lambda e: self._set_path(e.get_text()))
+        path_row.pack_start(self._browse_entry, True, True, 0)
+        btn = Gtk.Button(label="Browse…")
+        btn.connect("clicked", self._on_browse)
+        path_row.pack_start(btn, False, False, 0)
+        browse_box.pack_start(path_row, False, False, 0)
+        nb.append_page(browse_box, Gtk.Label(label="Browse…"))
+
+        self.show_all()
+
+    def _on_known_sel(self, sel):
+        model, it = sel.get_selected()
+        if it:
+            idx = model.get_path(it).get_indices()[0]
+            path = self._known_paths[idx]
+            if os.path.exists(path):
+                self._selected_path = path
+            else:
+                self._selected_path = ""
+
+    def _on_browse(self, _btn):
+        dlg = Gtk.FileChooserDialog(title="Select Disk Image",
+                                    parent=self, action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_OPEN,   Gtk.ResponseType.OK)
+        ff = Gtk.FileFilter()
+        if self._drive_type == "cdrom":
+            ff.set_name("CD-ROM Images (*.iso *.bin *.cue)")
+            for p in ["*.iso","*.bin","*.cue"]: ff.add_pattern(p)
+        else:
+            ff.set_name("Floppy Images (*.img *.ima *.vfd *.flp)")
+            for p in ["*.img","*.ima","*.vfd","*.flp"]: ff.add_pattern(p)
+        dlg.add_filter(ff)
+        all_ff = Gtk.FileFilter(); all_ff.set_name("All Files"); all_ff.add_pattern("*")
+        dlg.add_filter(all_ff)
+        if dlg.run() == Gtk.ResponseType.OK:
+            path = dlg.get_filename()
+            self._browse_entry.set_text(path)
+            self._set_path(path)
+        dlg.destroy()
+
+    def _set_path(self, path):
+        self._selected_path = path.strip()
+
+    @property
+    def selected_path(self):
+        return self._selected_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Disk Swap Overlay  – floating always-on-top panel shown while DOSBox runs
+# ─────────────────────────────────────────────────────────────────────────────
+class DiskSwapOverlay(Gtk.Window):
+    """Small floating window for one-click disk swapping via QEMU monitor."""
+
+    def __init__(self, parent, machine, monitor_sock, on_swap_cb):
+        super().__init__(title="💾 Disk Swap")
+        self.set_transient_for(parent)
+        self.set_keep_above(True)
+        self.set_resizable(False)
+        self.set_deletable(False)
+        self.set_border_width(8)
+        self.set_default_size(320, -1)
+        self.move(Gdk.Screen.get_default().get_width() - 340, 40)
+
+        self._machine      = machine
+        self._monitor_sock = monitor_sock
+        self._on_swap_cb   = on_swap_cb
+        self._db           = DOS_DB[machine["dos_key"]]
+        self._media_dir    = MEDIA_DIR / machine["id"]
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.add(vbox)
+
+        title = Gtk.Label()
+        title.set_markup(f'<b>💾 {machine["name"]}</b>')
+        title.set_halign(Gtk.Align.START)
+        vbox.pack_start(title, False, False, 0)
+        vbox.pack_start(Gtk.Separator(), False, False, 2)
+
+        self._drive_labels = {}
+        drives = [d for d in self._db["drives"] if d["type"] != "hdd"]
+        for drive in drives:
+            letter = drive["letter"]
+            dtype  = drive["type"]
+            icon   = "💿" if dtype == "cdrom" else "💾"
+
+            frame = Gtk.Frame(label=f"  {icon} Drive {letter}:  ")
+            fbox  = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            fbox.set_margin_top(4); fbox.set_margin_bottom(4)
+            fbox.set_margin_start(4); fbox.set_margin_end(4)
+            frame.add(fbox)
+
+            cur_lbl = Gtk.Label(label="(empty)", xalign=0)
+            cur_lbl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            cur_lbl.set_max_width_chars(30)
+            self._drive_labels[letter] = cur_lbl
+            fbox.pack_start(cur_lbl, False, False, 0)
+
+            btn_box = Gtk.FlowBox()
+            btn_box.set_max_children_per_line(2)
+            btn_box.set_selection_mode(Gtk.SelectionMode.NONE)
+
+            for disk in self._db.get("disks", []) + self._machine.get("extra_disks", []):
+                ext = Path(disk["file"]).suffix.lower()
+                if dtype == "cdrom" and ext not in (".iso", ".bin", ".cue"):
+                    continue
+                if dtype == "floppy" and ext in (".iso", ".bin", ".cue"):
+                    continue
+                full = self._media_dir / disk["file"]
+                btn = Gtk.Button(label=disk["label"])
+                btn.set_tooltip_text(disk["file"])
+                btn.set_sensitive(full.exists())
+                btn.connect("clicked", self._on_disk_btn, letter, dtype, str(full))
+                btn_box.add(btn)
+
+            browse_btn = Gtk.Button(label="📂 Browse…")
+            browse_btn.connect("clicked", self._on_browse, letter, dtype)
+            btn_box.add(browse_btn)
+
+            if dtype == "floppy":
+                blank_btn = Gtk.Button(label="💾 New Blank…")
+                blank_btn.connect("clicked", self._on_blank, letter)
+                btn_box.add(blank_btn)
+
+            if dtype == "cdrom":
+                blank_cd_btn = Gtk.Button(label="💿 New Blank CD…")
+                blank_cd_btn.connect("clicked", self._on_blank_cd, letter)
+                btn_box.add(blank_cd_btn)
+
+            eject_btn = Gtk.Button(label="⏏ Eject")
+            eject_btn.connect("clicked", self._on_eject, letter)
+            btn_box.add(eject_btn)
+
+            fbox.pack_start(btn_box, False, False, 0)
+            vbox.pack_start(frame, False, False, 0)
+
+        vbox.pack_start(Gtk.Separator(), False, False, 2)
+        close_btn = Gtk.Button(label="✕  Close Panel")
+        close_btn.connect("clicked", lambda _: self.hide())
+        vbox.pack_start(close_btn, False, False, 0)
+        self.show_all()
+
+    def update_drive(self, letter, path):
+        if letter in self._drive_labels:
+            self._drive_labels[letter].set_text(
+                os.path.basename(path) if path else "(empty)")
+
+    def _swap(self, letter, dtype, path):
+        """Swap disk via QEMU monitor — no xdotool needed."""
+        def do_swap():
+            try:
+                if dtype == "cdrom":
+                    qemu_swap_cdrom(self._monitor_sock, path)
+                else:
+                    qemu_swap_floppy(self._monitor_sock, letter, path)
+            except Exception as ex:
+                log(f"Swap error: {ex}")
+            GLib.idle_add(self.update_drive, letter, path)
+            GLib.idle_add(self._on_swap_cb, letter, path)
+        threading.Thread(target=do_swap, daemon=True).start()
+
+    def _on_disk_btn(self, _btn, letter, dtype, path):
+        self._swap(letter, dtype, path)
+
+    def _on_browse(self, _btn, letter, dtype):
+        dlg = Gtk.FileChooserDialog(title=f"Select image for Drive {letter}:",
+                                    parent=self, action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_OPEN,   Gtk.ResponseType.OK)
+        ff = Gtk.FileFilter()
+        if dtype == "cdrom":
+            ff.set_name("CD-ROM Images")
+            for p in ["*.iso","*.bin","*.cue"]: ff.add_pattern(p)
+        else:
+            ff.set_name("Floppy Images")
+            for p in ["*.img","*.ima","*.vfd","*.flp"]: ff.add_pattern(p)
+        dlg.add_filter(ff)
+        all_ff = Gtk.FileFilter(); all_ff.set_name("All Files"); all_ff.add_pattern("*")
+        dlg.add_filter(all_ff)
+        if dlg.run() == Gtk.ResponseType.OK:
+            self._swap(letter, dtype, dlg.get_filename())
+        dlg.destroy()
+
+    def _on_blank(self, _btn, letter):
+        dlg = Gtk.Dialog(title="New Blank Floppy", transient_for=self, flags=0)
+        dlg.set_default_size(260, 130)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        "Insert", Gtk.ResponseType.OK)
+        box = dlg.get_content_area()
+        box.set_margin_top(8); box.set_margin_start(8); box.set_margin_end(8)
+        lbl_e = Gtk.Entry()
+        lbl_e.set_placeholder_text("Label (optional, max 11 chars)")
+        lbl_e.set_max_length(11)
+        box.pack_start(lbl_e, False, False, 4)
+        size_c = Gtk.ComboBoxText()
+        for s in ["1.44 MB", "1.2 MB", "720 KB", "360 KB"]:
+            size_c.append_text(s)
+        size_c.set_active(0)
+        box.pack_start(size_c, False, False, 4)
+        dlg.show_all()
+        if dlg.run() == Gtk.ResponseType.OK:
+            vol  = lbl_e.get_text().strip().upper()[:11]
+            size = [1_474_560, 1_228_800, 737_280, 368_640][size_c.get_active()]
+            dlg.destroy()
+            self._media_dir.mkdir(parents=True, exist_ok=True)
+            ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fname = f"blank_{vol or 'FLOPPY'}_{ts}.img"
+            path = str(self._media_dir / fname)
+            try:
+                create_blank_floppy(path, size, vol)
+                self._save_extra_disk(fname, vol or "Blank Floppy")
+                self._swap(letter, "floppy", path)
+            except Exception as ex:
+                d = Gtk.MessageDialog(parent=self, flags=0,
+                    message_type=Gtk.MessageType.ERROR,
+                    buttons=Gtk.ButtonsType.OK, text=f"Failed: {ex}")
+                d.run(); d.destroy()
+        else:
+            dlg.destroy()
+
+    def _on_blank_cd(self, _btn, letter):
+        dlg = Gtk.Dialog(title="New Blank CD-ROM", transient_for=self, flags=0)
+        dlg.set_default_size(300, 150)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        "Create & Insert", Gtk.ResponseType.OK)
+        box = dlg.get_content_area()
+        box.set_margin_top(8); box.set_margin_start(8)
+        box.set_margin_end(8); box.set_margin_bottom(8)
+        box.set_spacing(6)
+
+        box.pack_start(Gtk.Label(label="Volume Label (max 32 chars):", xalign=0),
+                       False, False, 0)
+        lbl_e = Gtk.Entry()
+        lbl_e.set_max_length(32)
+        lbl_e.set_placeholder_text("e.g. MYDISC (optional)")
+        box.pack_start(lbl_e, False, False, 0)
+
+        box.pack_start(Gtk.Label(label="Size:", xalign=0), False, False, 0)
+        size_c = Gtk.ComboBoxText()
+        for s in ["650 MB (standard CD)", "700 MB (80-min CD)",
+                  "100 MB (small)", "50 MB (tiny)"]:
+            size_c.append_text(s)
+        size_c.set_active(0)
+        box.pack_start(size_c, False, False, 0)
+
+        dlg.show_all()
+        if dlg.run() == Gtk.ResponseType.OK:
+            vol  = lbl_e.get_text().strip()[:32] or "BLANK_CD"
+            sizes = [650, 700, 100, 50]
+            size_mb = sizes[size_c.get_active()]
+            dlg.destroy()
+            self._media_dir.mkdir(parents=True, exist_ok=True)
+            ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fname = f"blank_cd_{vol}_{ts}.iso"
+            path = str(self._media_dir / fname)
+            try:
+                create_blank_cdrom(path, size_mb, vol)
+                self._save_extra_disk(fname, vol)
+                self._swap(letter, "cdrom", path)
+            except Exception as ex:
+                d = Gtk.MessageDialog(parent=self, flags=0,
+                    message_type=Gtk.MessageType.ERROR,
+                    buttons=Gtk.ButtonsType.OK,
+                    text=f"Failed to create blank CD:\n{ex}")
+                d.run(); d.destroy()
+        else:
+            dlg.destroy()
+
+    def _on_eject(self, _btn, letter):
+        self._swap(letter, "floppy", "")
+
+    def _save_extra_disk(self, fname, label):
+        """Persist a newly created disk to the machine's saved disk list."""
+        machines = load_machines()
+        for m in machines:
+            if m["id"] == self._machine["id"]:
+                extra = m.setdefault("extra_disks", [])
+                if not any(d["file"] == fname for d in extra):
+                    extra.append({"label": label, "file": fname, "url": ""})
+                self._machine.setdefault("extra_disks", [])
+                if not any(d["file"] == fname for d in self._machine["extra_disks"]):
+                    self._machine["extra_disks"].append(
+                        {"label": label, "file": fname, "url": ""})
+                break
+        save_machines(machines)
+        GLib.idle_add(self._refresh_disk_buttons)
+
+    def _refresh_disk_buttons(self):
+        """Rebuild the overlay by destroying and recreating it."""
+        # Get parent window and recreate overlay with updated machine data
+        parent = self.get_transient_for()
+        if parent and hasattr(parent, "_show_overlay"):
+            self.destroy()
+            parent._overlay = None
+            parent._show_overlay()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main Window  (VirtualBox-style layout)
+# ─────────────────────────────────────────────────────────────────────────────
+class MainWindow(Gtk.Window):
+    def __init__(self, app):
+        super().__init__(title="MatTech DOS")
+        self.set_default_size(1000, 620)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.connect("destroy", self._on_window_destroy)
+
+        self._machines   = load_machines()
+        self._selected   = None
+        self._dosbox_proc = None
+        self._mounted    = {}
+        self._state_lbl  = None
+        self._overlay    = None
+        self._monitor_sock = None
+        self._autosave_counter = 0
+        self._stop_grace = 0   # grace ticks before declaring VM stopped
+
+        self._build_ui()
+        self._refresh_machine_list()
+        GLib.timeout_add(2000, self._poll_dosbox)
+        self.show_all()
+
+    # ── Build UI ──────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(vbox)
+
+        # ── Menu bar ──
+        menubar = self._build_menubar()
+        vbox.pack_start(menubar, False, False, 0)
+
+        # ── Main toolbar (VirtualBox-style) ──
+        tb = self._build_toolbar()
+        vbox.pack_start(tb, False, False, 0)
+
+        # ── Insert media toolbar (shown when DOSBox running) ──
+        self._media_bar = self._build_media_bar()
+        vbox.pack_start(self._media_bar, False, False, 0)
+
+        # ── Paned: left sidebar + right detail ──
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        paned.set_position(260)
+        vbox.pack_start(paned, True, True, 0)
+
+        paned.pack1(self._build_sidebar(), False, False)
+        paned.pack2(self._build_detail_panel(), True, False)
+
+        # ── Status bar ──
+        self._statusbar = Gtk.Statusbar()
+        self._status_ctx = self._statusbar.get_context_id("main")
+        vbox.pack_start(self._statusbar, False, False, 0)
+
+    # ── Menu bar ─────────────────────────────────────────────────────────────
+    def _build_menubar(self):
+        mb = Gtk.MenuBar()
+
+        def menu(label, items):
+            m = Gtk.Menu()
+            mi = Gtk.MenuItem(label=label)
+            mi.set_submenu(m)
+            for item in items:
+                if item is None:
+                    m.append(Gtk.SeparatorMenuItem())
+                else:
+                    lbl, cb = item
+                    i = Gtk.MenuItem(label=lbl)
+                    i.connect("activate", cb)
+                    m.append(i)
+            mb.append(mi)
+
+        menu("Machine", [
+            ("New Machine…",      self._on_new_machine),
+            ("Settings…",         self._on_machine_settings),
+            None,
+            ("Start / Resume",    self._on_start),
+            ("Shutdown",          self._on_shutdown),
+            ("Force Stop",        self._on_stop),
+            None,
+            ("Delete Saved State", self._on_delete_snapshot),
+            ("Factory Reset…",    self._on_factory_reset),
+            None,
+            ("Remove Machine",    self._on_remove_machine),
+        ])
+        menu("Media", [
+            ("Insert Floppy A:…", lambda *_: self._on_insert_drive("A")),
+            ("Insert Floppy B:…", lambda *_: self._on_insert_drive("B")),
+            ("Insert CD-ROM D:…", lambda *_: self._on_insert_drive("D")),
+            None,
+            ("Download Media…",   self._on_download_media),
+        ])
+        menu("Help", [
+            ("About", self._on_about),
+        ])
+        return mb
+
+    # ── Main toolbar ─────────────────────────────────────────────────────────
+    def _build_toolbar(self):
+        tb = Gtk.Toolbar()
+        tb.set_style(Gtk.ToolbarStyle.BOTH)
+        tb.get_style_context().add_class("primary-toolbar")
+
+        def tbtn(label, icon_name, cb, tooltip=""):
+            b = Gtk.ToolButton()
+            b.set_label(label)
+            b.set_icon_name(icon_name)
+            b.set_tooltip_text(tooltip or label)
+            b.connect("clicked", cb)
+            tb.insert(b, -1)
+            return b
+
+        tbtn("New",      "document-new",    self._on_new_machine,    "Create a new DOS machine")
+        tbtn("Settings", "preferences-system", self._on_machine_settings, "Machine settings")
+        tb.insert(Gtk.SeparatorToolItem(), -1)
+        self._tb_start = tbtn("Start",  "media-playback-start", self._on_start, "Start DOSBox")
+        self._tb_stop  = tbtn("Stop",   "media-playback-stop",  self._on_stop,  "Stop DOSBox")
+        tb.insert(Gtk.SeparatorToolItem(), -1)
+        tbtn("Download", "emblem-downloads", self._on_download_media, "Download install media")
+        tb.insert(Gtk.SeparatorToolItem(), -1)
+        tbtn("Disk Swap", "media-floppy", self._on_show_overlay, "Show disk swap panel")
+        return tb
+
+    # ── Insert media toolbar ──────────────────────────────────────────────────
+    def _build_media_bar(self):
+        bar = Gtk.Box(spacing=4)
+        bar.set_margin_start(8); bar.set_margin_end(8)
+        bar.set_margin_top(2);   bar.set_margin_bottom(2)
+        # Use CSS instead of deprecated override_background_color
+        css = b"box { background-color: #f2f2f2; }"
+        provider = Gtk.CssProvider()
+        provider.load_from_data(css)
+        bar.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        bar.pack_start(Gtk.Label(label="Insert:"), False, False, 4)
+
+        # Drive buttons are built dynamically when a machine is selected
+        self._drive_buttons_box = Gtk.Box(spacing=4)
+        bar.pack_start(self._drive_buttons_box, False, False, 0)
+
+        # Blank floppy button
+        blank_btn = Gtk.Button(label="💾 New Blank Floppy…")
+        blank_btn.set_tooltip_text("Create and insert a blank floppy image")
+        blank_btn.connect("clicked", self._on_insert_blank_floppy)
+        bar.pack_start(blank_btn, False, False, 4)
+
+        # Eject all
+        eject_btn = Gtk.Button(label="⏏ Eject All")
+        eject_btn.connect("clicked", self._on_eject_all)
+        bar.pack_end(eject_btn, False, False, 4)
+
+        bar.set_no_show_all(False)
+        return bar
+
+    def _rebuild_drive_buttons(self):
+        for child in self._drive_buttons_box.get_children():
+            self._drive_buttons_box.remove(child)
+        if not self._selected:
+            return
+        db = DOS_DB[self._selected["dos_key"]]
+        for drive in db["drives"]:
+            letter = drive["letter"]
+            dtype  = drive["type"]
+            if dtype == "hdd":
+                continue
+            icon = "media-optical" if dtype == "cdrom" else "media-floppy"
+            label = f"{'💿' if dtype=='cdrom' else '💾'} Drive {letter}:▾"
+            btn = Gtk.Button(label=label)
+            btn.set_tooltip_text(f"Insert image into drive {letter}:")
+            btn.connect("clicked", lambda _b, l=letter, t=dtype: self._on_insert_drive(l, t))
+            self._drive_buttons_box.pack_start(btn, False, False, 0)
+        self._drive_buttons_box.show_all()
+
+    # ── Left sidebar ──────────────────────────────────────────────────────────
+    def _build_sidebar(self):
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        vbox.set_size_request(260, -1)
+
+        # Search bar
+        search = Gtk.SearchEntry()
+        search.set_placeholder_text("Search machines…")
+        search.connect("search-changed", self._on_search)
+        vbox.pack_start(search, False, False, 0)
+
+        # Machine list
+        self._machine_store = Gtk.ListStore(str, str, str)  # id, name, status
+        self._machine_filter = self._machine_store.filter_new()
+        self._search_text = ""
+        self._machine_filter.set_visible_func(self._filter_func)
+
+        self._machine_tv = Gtk.TreeView(model=self._machine_filter)
+        self._machine_tv.set_headers_visible(False)
+        self._machine_tv.get_selection().connect("changed", self._on_machine_selected)
+
+        # Icon + name column
+        col = Gtk.TreeViewColumn()
+        icon_r = Gtk.CellRendererPixbuf()
+        icon_r.set_property("icon-name", "computer")
+        col.pack_start(icon_r, False)
+        name_r = Gtk.CellRendererText()
+        name_r.set_property("ellipsize", Pango.EllipsizeMode.END)
+        col.pack_start(name_r, True)
+        col.add_attribute(name_r, "text", 1)
+        # Status badge
+        status_r = Gtk.CellRendererText()
+        status_r.set_property("foreground", "#888888")
+        status_r.set_property("size-points", 8)
+        col.pack_start(status_r, False)
+        col.add_attribute(status_r, "text", 2)
+        self._machine_tv.append_column(col)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.add(self._machine_tv)
+        vbox.pack_start(sw, True, True, 0)
+
+        # Bottom buttons
+        btn_row = Gtk.Box(spacing=2)
+        btn_row.set_margin_top(2); btn_row.set_margin_bottom(2)
+        new_btn = Gtk.Button(label="＋")
+        new_btn.set_tooltip_text("New Machine")
+        new_btn.connect("clicked", self._on_new_machine)
+        del_btn = Gtk.Button(label="－")
+        del_btn.set_tooltip_text("Remove Machine")
+        del_btn.connect("clicked", self._on_remove_machine)
+        btn_row.pack_start(new_btn, False, False, 4)
+        btn_row.pack_start(del_btn, False, False, 0)
+        vbox.pack_start(btn_row, False, False, 0)
+
+        return vbox
+
+    def _filter_func(self, model, it, _data):
+        if not self._search_text:
+            return True
+        name = model.get_value(it, 1) or ""
+        return self._search_text.lower() in name.lower()
+
+    def _on_search(self, entry):
+        self._search_text = entry.get_text()
+        self._machine_filter.refilter()
+
+    # ── Right detail panel ────────────────────────────────────────────────────
+    def _build_detail_panel(self):
+        self._detail_stack = Gtk.Stack()
+        self._detail_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+
+        # Welcome screen
+        welcome = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        welcome.set_valign(Gtk.Align.CENTER)
+        welcome.set_halign(Gtk.Align.CENTER)
+        lbl = Gtk.Label()
+        lbl.set_markup('<span size="xx-large" weight="bold" color="#1a6496">'
+                       '💾 MatTech DOS</span>')
+        welcome.pack_start(lbl, False, False, 0)
+        welcome.pack_start(Gtk.Label(
+            label="Select a machine from the list, or create a new one."),
+            False, False, 0)
+        btn = Gtk.Button(label="＋  Create New Machine")
+        btn.get_style_context().add_class("suggested-action")
+        btn.connect("clicked", self._on_new_machine)
+        welcome.pack_start(btn, False, False, 0)
+        self._detail_stack.add_named(welcome, "welcome")
+
+        # Machine detail view
+        self._detail_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._detail_stack.add_named(self._detail_box, "detail")
+
+        return self._detail_stack
+
+    def _build_machine_detail(self, machine):
+        """Populate the right panel with machine info."""
+        for child in self._detail_box.get_children():
+            self._detail_box.remove(child)
+
+        db = DOS_DB[machine["dos_key"]]
+
+        # ── Header ──
+        hdr = Gtk.Box(spacing=12)
+        hdr.set_margin_top(16); hdr.set_margin_bottom(8)
+        hdr.set_margin_start(16); hdr.set_margin_end(16)
+        icon = Gtk.Image.new_from_icon_name("computer", Gtk.IconSize.DIALOG)
+        hdr.pack_start(icon, False, False, 0)
+        hdr_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        name_lbl = Gtk.Label()
+        name_lbl.set_markup(f'<span size="x-large" weight="bold">{machine["name"]}</span>')
+        name_lbl.set_halign(Gtk.Align.START)
+        hdr_text.pack_start(name_lbl, False, False, 0)
+        state_lbl = Gtk.Label(label="Powered Off", xalign=0)
+        state_lbl.set_name("machine-state")
+        self._state_lbl = state_lbl
+        hdr_text.pack_start(state_lbl, False, False, 0)
+        hdr.pack_start(hdr_text, True, True, 0)
+
+        # Start/Stop buttons in header
+        self._hdr_start_btn = Gtk.Button(label="▶  Start")
+        self._hdr_start_btn.get_style_context().add_class("suggested-action")
+        self._hdr_start_btn.connect("clicked", self._on_start)
+        hdr.pack_end(self._hdr_start_btn, False, False, 0)
+        self._detail_box.pack_start(hdr, False, False, 0)
+        self._detail_box.pack_start(Gtk.Separator(), False, False, 0)
+
+        # ── Specs section ──
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        inner.set_margin_top(12); inner.set_margin_bottom(12)
+        inner.set_margin_start(16); inner.set_margin_end(16)
+
+        def section(title):
+            f = Gtk.Frame()
+            lbl = Gtk.Label()
+            lbl.set_markup(f'<b>{title}</b>')
+            f.set_label_widget(lbl)
+            f.set_shadow_type(Gtk.ShadowType.ETCHED_IN)
+            g = Gtk.Grid()
+            g.set_row_spacing(6); g.set_column_spacing(16)
+            g.set_margin_top(8); g.set_margin_bottom(8)
+            g.set_margin_start(8); g.set_margin_end(8)
+            f.add(g)
+            inner.pack_start(f, False, False, 0)
+            return g
+
+        def row(grid, r, key, val):
+            k = Gtk.Label(label=key + ":", xalign=1)
+            k.set_width_chars(16)
+            k.get_style_context().add_class("dim-label")
+            grid.attach(k, 0, r, 1, 1)
+            v = Gtk.Label(label=str(val), xalign=0)
+            v.set_hexpand(True)
+            grid.attach(v, 1, r, 1, 1)
+
+        # System
+        g = section("⚙  System")
+        row(g, 0, "DOS Version",   db["name"])
+        row(g, 1, "CPU",           db["cpu"].upper())
+        row(g, 2, "Base Memory",   f"{machine['ram_mb']} MB")
+        row(g, 3, "DOSBox Cycles", str(machine["cycles"]))
+        row(g, 4, "Disk Space",    f"{machine['disk_mb']} MB")
+        hdd = machine.get("hdd_path", "")
+        has_snap = _has_saved_state(hdd) if hdd and os.path.exists(hdd) else False
+        row(g, 5, "Saved State",   "✓ Snapshot available — will resume" if has_snap else "None (fresh boot)")
+
+        # Storage
+        g2 = section("💾  Storage")
+        media_dir = MEDIA_DIR / machine["id"]
+        for i, disk in enumerate(db.get("disks", [])):
+            full = media_dir / disk["file"]
+            status = "✓ Ready" if full.exists() else "✗ Not downloaded"
+            row(g2, i, disk["label"], f"{disk['file']}  [{status}]")
+
+        # Currently mounted
+        g3 = section("💿  Mounted Media")
+        if self._mounted:
+            for i, (letter, path) in enumerate(self._mounted.items()):
+                row(g3, i, f"Drive {letter}:", os.path.basename(path))
+        else:
+            row(g3, 0, "Status", "No media mounted")
+
+        scroll.add(inner)
+        self._detail_box.pack_start(scroll, True, True, 0)
+        self._detail_box.show_all()
+        self._detail_stack.set_visible_child_name("detail")
+
+    # ── Machine list helpers ──────────────────────────────────────────────────
+    def _refresh_machine_list(self):
+        self._machine_store.clear()
+        for m in self._machines:
+            self._machine_store.append([m["id"], m["name"], "Powered Off"])
+        if not self._machines:
+            self._detail_stack.set_visible_child_name("welcome")
+
+    def _on_machine_selected(self, sel):
+        model, it = sel.get_selected()
+        if not it:
+            return
+        mid = model.get_value(it, 0)
+        self._selected = next((m for m in self._machines if m["id"] == mid), None)
+        if self._selected:
+            self._mounted = {}
+            self._rebuild_drive_buttons()
+            self._build_machine_detail(self._selected)
+
+    def _set_status(self, msg):
+        self._statusbar.pop(self._status_ctx)
+        self._statusbar.push(self._status_ctx, msg)
+
+    def _poll_dosbox(self):
+        running = False
+        if self._dosbox_proc is not None:
+            ret = self._dosbox_proc.poll()
+            if ret is None:
+                running = True
+                self._stop_grace = 0
+                # Periodic autosave every 5 minutes (150 x 2s ticks)
+                self._autosave_counter += 1
+                if self._autosave_counter >= 150:
+                    self._autosave_counter = 0
+                    sock = getattr(self, "_monitor_sock", None)
+                    if sock and os.path.exists(sock):
+                        threading.Thread(
+                            target=lambda: qemu_monitor_cmd(sock, "savevm mattech_autosave"),
+                            daemon=True).start()
+            else:
+                # Process poll says stopped — but verify via monitor socket
+                # before declaring VM dead (disk swap can cause brief blips)
+                sock = getattr(self, "_monitor_sock", None)
+                if sock and os.path.exists(sock):
+                    # Socket still exists — QEMU is still running, ignore poll
+                    running = True
+                    self._stop_grace = 0
+                else:
+                    # No socket either — VM is genuinely stopped
+                    self._stop_grace += 1
+                    if self._stop_grace < 2:
+                        running = True  # one extra tick grace
+                    else:
+                        self._dosbox_proc = None
+                        self._monitor_sock = None
+                        self._mounted = {}
+                        self._stop_grace = 0
+                        GLib.idle_add(self._on_dosbox_stopped)
+
+        # Show media bar whenever a machine is selected (not just when running)
+        if self._selected:
+            self._media_bar.show()
+        else:
+            self._media_bar.hide()
+
+        if self._state_lbl:
+            self._state_lbl.set_text("Running" if running else "Powered Off")
+        return True
+
+    def _on_dosbox_stopped(self):
+        self._set_status("DOSBox stopped.")
+        if self._selected:
+            self._build_machine_detail(self._selected)
+
+    # ── Toolbar / menu actions ────────────────────────────────────────────────
+    def _on_factory_reset(self, _btn=None):
+        if not self._selected:
+            return
+        # Stop if running
+        if self._dosbox_proc and self._dosbox_proc.poll() is None:
+            self._show_error("Please stop the machine before resetting it.")
+            return
+
+        name = self._selected["name"]
+        dlg = Gtk.MessageDialog(parent=self, flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"Factory Reset '{name}'?")
+        dlg.format_secondary_text(
+            "This will permanently delete:\n"
+            "  • The virtual hard disk (all installed software)\n"
+            "  • Any saved VM state\n\n"
+            "Downloaded install media will be kept.\n\n"
+            "This cannot be undone.")
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        reset_btn = dlg.add_button("Factory Reset", Gtk.ResponseType.OK)
+        reset_btn.get_style_context().add_class("destructive-action")
+        resp = dlg.run()
+        dlg.destroy()
+
+        if resp != Gtk.ResponseType.OK:
+            return
+
+        try:
+            # Delete HDD image
+            hdd = self._selected.get("hdd_path", "")
+            if hdd and os.path.exists(hdd):
+                os.unlink(hdd)
+                log(f"Factory reset: deleted HDD {hdd}")
+
+            # Clear hdd_path so a fresh one gets created on next start
+            self._selected["hdd_path"] = ""
+            save_machines(self._machines)
+
+            self._build_machine_detail(self._selected)
+            self._set_status(f"'{name}' has been factory reset.")
+            self._show_info(
+                f"'{name}' has been factory reset.\n\n"
+                f"A fresh hard disk will be created on next start.\n"
+                f"Click Download to re-download install media if needed.")
+        except Exception as ex:
+            self._show_error(f"Factory reset failed:\n{ex}")
+
+    def _on_delete_snapshot(self, _btn=None):
+        if not self._selected:
+            return
+        hdd = self._selected.get("hdd_path", "")
+        if not hdd or not os.path.exists(hdd):
+            self._show_error("No HDD image found for this machine.")
+            return
+        if not _has_saved_state(hdd):
+            self._show_info("No saved state to delete.")
+            return
+        dlg = Gtk.MessageDialog(parent=self, flags=0,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text="Delete saved state?")
+        dlg.format_secondary_text("The machine will do a fresh boot next time.")
+        if dlg.run() == Gtk.ResponseType.YES:
+            try:
+                subprocess.run(["qemu-img", "snapshot", "-d",
+                                "mattech_autosave", hdd], check=True)
+                self._build_machine_detail(self._selected)
+                self._set_status("Saved state deleted.")
+            except Exception as ex:
+                self._show_error(f"Failed to delete snapshot:\n{ex}")
+        dlg.destroy()
+
+    def _on_show_overlay(self, _btn=None):
+        if self._overlay:
+            self._overlay.show()
+            self._overlay.present()
+        elif self._dosbox_proc and self._dosbox_proc.poll() is None:
+            self._show_overlay()
+        else:
+            self._show_error("Start a machine first to use the Disk Swap panel.")
+
+    def _on_new_machine(self, _btn=None):
+        dlg = NewMachineDialog(self)
+        resp = dlg.run()
+        dos_key = dlg.dos_key
+        name    = dlg.machine_name
+        auto_dl = dlg.auto_download
+        dlg.destroy()
+
+        if resp != Gtk.ResponseType.OK:
+            return
+
+        m = new_machine(dos_key)
+        m["name"] = name
+        self._machines.append(m)
+        save_machines(self._machines)
+        self._refresh_machine_list()
+
+        # Select the new machine
+        for row in self._machine_store:
+            if row[0] == m["id"]:
+                self._machine_tv.get_selection().select_iter(row.iter)
+                break
+
+        if auto_dl:
+            self._do_download(m)
+
+    def _on_remove_machine(self, _btn=None):
+        if not self._selected:
+            return
+        dlg = Gtk.MessageDialog(parent=self, flags=0,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text=f"Remove machine '{self._selected['name']}'?")
+        dlg.format_secondary_text("This will not delete any downloaded media files.")
+        if dlg.run() == Gtk.ResponseType.YES:
+            self._machines = [m for m in self._machines if m["id"] != self._selected["id"]]
+            save_machines(self._machines)
+            self._selected = None
+            self._refresh_machine_list()
+            self._detail_stack.set_visible_child_name("welcome")
+        dlg.destroy()
+
+    def _on_machine_settings(self, _btn=None):
+        if not self._selected:
+            return
+        self._show_settings_dialog(self._selected)
+
+    def _on_start(self, _btn=None):
+        if not self._selected:
+            self._show_error("Select a machine first.")
+            return
+        if not shutil.which("qemu-system-i386") and not shutil.which("qemu-system-x86_64"):
+            self._show_error("QEMU not found.\nInstall: sudo apt install qemu-system-x86")
+            return
+
+        # Check boot media exists and isn't partial
+        db = DOS_DB[self._selected["dos_key"]]
+        media_dir = MEDIA_DIR / self._selected["id"]
+        boot_disk  = db.get("boot_disk", "")
+        boot_cdrom = db.get("boot_cdrom", "")
+        missing = []
+        for fname, label in [(boot_disk, "Boot Floppy"), (boot_cdrom, "Install CD/ISO")]:
+            if fname:
+                p = media_dir / fname
+                if not p.exists():
+                    missing.append(f"  • {label} ({fname})")
+        if missing and not self._selected.get("hdd_path") or (
+                missing and not os.path.exists(self._selected.get("hdd_path",""))):
+            self._show_error(
+                "Missing or partial install media:\n" + "\n".join(missing) +
+                "\n\nPlease click Download first.")
+            return
+        try:
+            args, hdd_path, monitor_sock = get_qemu_args(self._selected)
+            # Resume from saved state only if no floppy boot disk
+            # (QEMU can't load snapshots with writable floppy drives)
+            db = DOS_DB[self._selected["dos_key"]]
+            has_floppy = any(d["type"] == "floppy" for d in db.get("drives", []))
+            if _has_saved_state(hdd_path) and not has_floppy:
+                args += ["-loadvm", "mattech_autosave"]
+                self._set_status(f"Resuming: {self._selected['name']}…")
+            elif _has_saved_state(hdd_path) and has_floppy:
+                self._set_status(f"Starting: {self._selected['name']} (snapshot ignored — floppy present)…")
+            else:
+                self._set_status(f"Starting: {self._selected['name']}…")
+            self._monitor_sock = monitor_sock
+            save_machines(self._machines)
+            log(f"Starting QEMU: {' '.join(args)}")
+            self._dosbox_proc = subprocess.Popen(args)
+            self._set_status(f"Started: {self._selected['name']}")
+            self._media_bar.show()
+            self._rebuild_drive_buttons()
+            if self._hdr_start_btn:
+                self._hdr_start_btn.set_label("⏻  Shutdown")
+                self._hdr_start_btn.get_style_context().remove_class("suggested-action")
+                self._hdr_start_btn.get_style_context().add_class("destructive-action")
+                self._hdr_start_btn.disconnect_by_func(self._on_start)
+                self._hdr_start_btn.connect("clicked", self._on_shutdown)
+            GLib.timeout_add(2000, self._show_overlay)
+        except Exception as ex:
+            self._show_error(f"Failed to start QEMU:\n{ex}")
+
+    def _on_shutdown(self, _btn=None):
+        """Send ACPI shutdown via QEMU monitor."""
+        if not self._dosbox_proc or self._dosbox_proc.poll() is not None:
+            return
+        sock = getattr(self, "_monitor_sock", None)
+        if sock and os.path.exists(sock):
+            def do_shutdown():
+                qemu_shutdown(sock)
+                time.sleep(6)
+                GLib.idle_add(self._save_and_stop)
+            threading.Thread(target=do_shutdown, daemon=True).start()
+            self._set_status("Sending ACPI shutdown…")
+        else:
+            self._save_and_stop()
+
+    def _show_overlay(self):
+        if not self._dosbox_proc or self._dosbox_proc.poll() is not None:
+            # Also check monitor socket
+            sock = getattr(self, "_monitor_sock", None)
+            if not sock or not os.path.exists(sock):
+                return False
+        if self._overlay:
+            try:
+                self._overlay.destroy()
+            except Exception:
+                pass
+        # Reload machine from disk to get latest extra_disks
+        machines = load_machines()
+        fresh = next((m for m in machines if m["id"] == self._selected["id"]),
+                     self._selected)
+        self._selected.update(fresh)
+        self._overlay = DiskSwapOverlay(
+            self,
+            self._selected,
+            getattr(self, "_monitor_sock", None),
+            self._on_overlay_swap)
+        return False
+
+    def _on_overlay_swap(self, letter, path):
+        self._mounted[letter] = path
+        # Update status bar
+        if path:
+            self._set_status(f"Drive {letter}: → {os.path.basename(path)}")
+        else:
+            self._set_status(f"Drive {letter}: ejected")
+        # Update the mounted display in detail panel without full rebuild
+        if self._state_lbl:
+            running = self._dosbox_proc and self._dosbox_proc.poll() is None
+            self._state_lbl.set_text("Running" if running else "Powered Off")
+
+    def _save_and_stop(self):
+        save_machines(self._machines)
+        self._on_stop()
+
+    def _on_stop(self, _btn=None):
+        sock = getattr(self, "_monitor_sock", None)
+        if sock and os.path.exists(sock):
+            try:
+                # Save state before stopping
+                qemu_monitor_cmd(sock, "savevm mattech_autosave")
+                time.sleep(1)
+                qemu_stop(sock)
+                time.sleep(0.5)
+            except Exception:
+                pass
+        if self._dosbox_proc and self._dosbox_proc.poll() is None:
+            self._dosbox_proc.terminate()
+            try:
+                self._dosbox_proc.wait(timeout=5)
+            except Exception:
+                self._dosbox_proc.kill()
+        self._dosbox_proc = None
+        self._monitor_sock = None
+        self._mounted = {}
+        if self._overlay:
+            self._overlay.destroy()
+            self._overlay = None
+        save_machines(self._machines)
+        self._set_status("QEMU stopped — state saved.")
+        if self._selected:
+            self._build_machine_detail(self._selected)
+
+    def _on_download_media(self, _btn=None):
+        if not self._selected:
+            self._show_error("Select a machine first.")
+            return
+        self._do_download(self._selected)
+
+    def _do_download(self, machine):
+        dlg = DownloadDialog(self, machine)
+        dlg.run()
+        results = dlg._results
+        dlg.destroy()
+        # Update machine media paths
+        db = DOS_DB[machine["dos_key"]]
+        media_dir = MEDIA_DIR / machine["id"]
+        for disk in db.get("disks", []):
+            path = results.get(disk["file"])
+            if path:
+                machine.setdefault("media_files", {})[disk["file"]] = path
+        # Post-process: extract mouse driver floppy from zip if present
+        mouse_zip = media_dir / "mouse_driver.zip"
+        mouse_floppy = media_dir / "mouse_driver.img"
+        if mouse_zip.exists():
+            # Re-extract if missing or too small (failed previous attempt)
+            if not mouse_floppy.exists() or mouse_floppy.stat().st_size < 100_000:
+                self._extract_mouse_driver(mouse_zip, mouse_floppy, machine)
+        save_machines(self._machines)
+        if self._selected and self._selected["id"] == machine["id"]:
+            self._build_machine_detail(machine)
+        self._set_status("Download complete.")
+
+    def _extract_mouse_driver(self, zip_path, floppy_path, machine):
+        """Extract mouse driver floppy image from zip."""
+        import zipfile
+        try:
+            with zipfile.ZipFile(zip_path) as z:
+                # Look for the setup floppy image
+                target = None
+                for name in z.namelist():
+                    n = name.upper()
+                    if n.endswith(".IMG") and "SETUP" in n:
+                        target = name
+                        break
+                # Fallback: any .img file
+                if not target:
+                    for name in z.namelist():
+                        if name.upper().endswith(".IMG"):
+                            target = name
+                            break
+                if not target:
+                    log("No .img found in mouse driver zip")
+                    return
+                log(f"Extracting mouse driver: {target}")
+                data = z.read(target)
+                with open(floppy_path, "wb") as f:
+                    f.write(data)
+                log(f"Mouse driver floppy extracted: {floppy_path} ({len(data)} bytes)")
+
+            # Add to machine's extra disks
+            machine.setdefault("extra_disks", [])
+            if not any(d["file"] == "mouse_driver.img"
+                       for d in machine["extra_disks"]):
+                machine["extra_disks"].append(
+                    {"label": "Mouse Driver Setup", "file": "mouse_driver.img", "url": ""})
+            save_machines(self._machines)
+        except Exception as ex:
+            log(f"Mouse driver extraction failed: {ex}")
+            import traceback
+            log(traceback.format_exc())
+
+    def _on_insert_drive(self, letter, drive_type=None):
+        if not self._selected:
+            return
+        if drive_type is None:
+            db = DOS_DB[self._selected["dos_key"]]
+            for d in db["drives"]:
+                if d["letter"] == letter:
+                    drive_type = d["type"]
+                    break
+            drive_type = drive_type or "floppy"
+
+        dlg = InsertMediaDialog(self, self._selected, letter, drive_type)
+        resp = dlg.run()
+        path = dlg.selected_path
+        dlg.destroy()
+
+        if resp != Gtk.ResponseType.OK or not path:
+            return
+        if not os.path.exists(path):
+            self._show_error(f"File not found:\n{path}")
+            return
+
+        self._mounted[letter] = path
+
+        # Auto-type the imgmount command into the running DOSBox window
+        if self._dosbox_proc and self._dosbox_proc.poll() is None:
+            ext = Path(path).suffix.lower()
+            if ext == ".iso":
+                cmd = f'imgmount {letter.lower()} "{path}" -t iso -fs iso\n'
+            else:
+                cmd = f'imgmount {letter.lower()} "{path}" -t floppy\n'
+            self._set_status(f"Swapping Drive {letter}: → {os.path.basename(path)}…")
+            # Use xdotool to type into DOSBox window automatically
+            threading.Thread(
+                target=self._autotype_to_dosbox,
+                args=(cmd,), daemon=True).start()
+        else:
+            self._set_status(f"Drive {letter}: → {os.path.basename(path)}")
+
+        if self._selected:
+            self._build_machine_detail(self._selected)
+
+    def _on_eject_all(self, _btn=None):
+        self._mounted = {}
+        self._set_status("All drives ejected.")
+        if self._selected:
+            self._build_machine_detail(self._selected)
+
+    def _on_insert_blank_floppy(self, _btn=None):
+        if not self._selected:
+            self._show_error("Select a machine first.")
+            return
+        drive_dlg = Gtk.Dialog(title="Insert Blank Floppy", transient_for=self, flags=0)
+        drive_dlg.set_default_size(340, 220)
+        drive_dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                              "Insert", Gtk.ResponseType.OK)
+        box = drive_dlg.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_top(12); box.set_margin_bottom(12)
+        box.set_margin_start(12); box.set_margin_end(12)
+
+        # Label
+        box.pack_start(Gtk.Label(label="Volume Label (leave empty for unformatted):", xalign=0), False, False, 0)
+        label_entry = Gtk.Entry()
+        label_entry.set_max_length(11)
+        label_entry.set_placeholder_text("Empty = unformatted (for installers)")
+        box.pack_start(label_entry, False, False, 0)
+
+        # Drive
+        box.pack_start(Gtk.Label(label="Insert into drive:", xalign=0), False, False, 0)
+        drive_combo = Gtk.ComboBoxText()
+        for d in ["A", "B"]:
+            drive_combo.append_text(f"Drive {d}:")
+        drive_combo.set_active(0)
+        box.pack_start(drive_combo, False, False, 0)
+
+        # Size
+        size_box = Gtk.Box(spacing=8)
+        size_box.pack_start(Gtk.Label(label="Size:", xalign=0), False, False, 0)
+        size_combo = Gtk.ComboBoxText()
+        for s in ["1.44 MB", "1.2 MB", "720 KB", "360 KB"]:
+            size_combo.append_text(s)
+        size_combo.set_active(0)
+        size_box.pack_start(size_combo, True, True, 0)
+        box.pack_start(size_box, False, False, 0)
+
+        drive_dlg.show_all()
+
+        resp = drive_dlg.run()
+        vol_label = label_entry.get_text().strip().upper()[:11]
+        letter     = ["A", "B"][drive_combo.get_active()]
+        sizes      = [1_474_560, 1_228_800, 737_280, 368_640]
+        size_bytes = sizes[size_combo.get_active()]
+        drive_dlg.destroy()
+
+        if resp != Gtk.ResponseType.OK:
+            return
+
+        try:
+            media_dir = MEDIA_DIR / self._selected["id"]
+            media_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_label = vol_label.replace(" ", "_") or "BLANK"
+            blank_path = str(media_dir / f"{safe_label}_{ts}.img")
+            log(f"Creating blank floppy: {blank_path} ({size_bytes} bytes) label='{vol_label}'")
+            create_blank_floppy(blank_path, size_bytes, vol_label)
+            log(f"Blank floppy created OK, mounting as {letter}:")
+            self._mounted[letter] = blank_path
+            if self._dosbox_proc and self._dosbox_proc.poll() is None:
+                cmd = f'imgmount {letter.lower()} "{blank_path}" -t floppy\n'
+                threading.Thread(target=self._autotype_to_dosbox,
+                                 args=(cmd,), daemon=True).start()
+            if self._selected:
+                self._build_machine_detail(self._selected)
+            self._set_status(f"Blank floppy '{vol_label or 'BLANK'}' inserted into Drive {letter}:")
+        except Exception as ex:
+            import traceback
+            log(f"Blank floppy error: {traceback.format_exc()}")
+            self._show_error(f"Failed to create blank floppy:\n{ex}")
+
+    def _on_about(self, _btn=None):
+        dlg = Gtk.AboutDialog()
+        dlg.set_transient_for(self)
+        dlg.set_program_name("MatTech DOS")
+        dlg.set_version(APP_VERSION)
+        dlg.set_comments("A VirtualBox-style DOSBox frontend with floppy & CD-ROM management.")
+        dlg.set_license_type(Gtk.License.MIT_X11)
+        dlg.run()
+        dlg.destroy()
+
+    # ── Settings dialog ───────────────────────────────────────────────────────
+    def _show_settings_dialog(self, machine):
+        dlg = Gtk.Dialog(title=f"Settings – {machine['name']}",
+                         transient_for=self, flags=0)
+        dlg.set_default_size(480, 320)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_SAVE,   Gtk.ResponseType.OK)
+
+        box = dlg.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_top(12); box.set_margin_bottom(12)
+        box.set_margin_start(12); box.set_margin_end(12)
+
+        grid = Gtk.Grid()
+        grid.set_row_spacing(8); grid.set_column_spacing(12)
+
+        def row(r, label, widget):
+            grid.attach(Gtk.Label(label=label+":", xalign=1, width_chars=14), 0, r, 1, 1)
+            widget.set_hexpand(True)
+            grid.attach(widget, 1, r, 1, 1)
+
+        name_e = Gtk.Entry(); name_e.set_text(machine["name"])
+        row(0, "Name", name_e)
+
+        cycles_e = Gtk.Entry(); cycles_e.set_text(str(machine["cycles"]))
+        row(1, "CPU Cycles", cycles_e)
+
+        ram_e = Gtk.SpinButton.new_with_range(1, 256, 1)
+        ram_e.set_value(machine["ram_mb"])
+        row(2, "RAM (MB)", ram_e)
+
+        disk_e = Gtk.SpinButton.new_with_range(10, 2048, 10)
+        disk_e.set_value(machine["disk_mb"])
+        row(3, "Disk (MB)", disk_e)
+
+        box.pack_start(grid, True, True, 0)
+        dlg.show_all()
+
+        if dlg.run() == Gtk.ResponseType.OK:
+            machine["name"]     = name_e.get_text().strip() or machine["name"]
+            machine["cycles"]   = int(cycles_e.get_text()) if cycles_e.get_text().isdigit() else machine["cycles"]
+            machine["ram_mb"]   = int(ram_e.get_value())
+            machine["disk_mb"]  = int(disk_e.get_value())
+            save_machines(self._machines)
+            self._refresh_machine_list()
+            self._build_machine_detail(machine)
+        dlg.destroy()
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+    def _autotype_to_dosbox(self, cmd):
+        """Find the DOSBox window by PID and type a command into it via xdotool."""
+        try:
+            pid = self._dosbox_proc.pid
+            # Find window ID for the DOSBox process
+            result = subprocess.run(
+                ["xdotool", "search", "--pid", str(pid)],
+                capture_output=True, text=True)
+            wids = result.stdout.strip().split()
+            if not wids:
+                # Fallback: search by window name
+                result = subprocess.run(
+                    ["xdotool", "search", "--name", "DOSBox"],
+                    capture_output=True, text=True)
+                wids = result.stdout.strip().split()
+            if not wids:
+                log("xdotool: no DOSBox window found")
+                GLib.idle_add(self._set_status,
+                    "Could not find DOSBox window. Type the command manually.")
+                return
+            wid = wids[-1]
+            log(f"xdotool: found window {wid}, typing command")
+            # Focus the window
+            subprocess.run(["xdotool", "windowfocus", "--sync", wid])
+            time.sleep(0.3)
+            # Type the command (xdotool type handles special chars)
+            subprocess.run(["xdotool", "type", "--clearmodifiers",
+                            "--delay", "30", cmd])
+            log(f"xdotool: typed: {cmd.strip()}")
+            GLib.idle_add(self._set_status,
+                f"Command sent to DOSBox: {cmd.strip()}")
+        except FileNotFoundError:
+            log("xdotool not installed")
+            GLib.idle_add(self._show_swap_hint_fallback, cmd.strip())
+        except Exception as ex:
+            log(f"xdotool error: {ex}")
+            GLib.idle_add(self._show_swap_hint_fallback, cmd.strip())
+
+    def _show_swap_hint_fallback(self, cmd):
+        """Shown only if xdotool is unavailable."""
+        dlg = Gtk.Dialog(title="Type in DOSBox", transient_for=self, flags=0)
+        dlg.set_default_size(480, 140)
+        dlg.add_button("OK", Gtk.ResponseType.OK)
+        box = dlg.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_top(12); box.set_margin_bottom(12)
+        box.set_margin_start(12); box.set_margin_end(12)
+        box.pack_start(Gtk.Label(
+            label="Install xdotool for automatic disk swapping:\n"
+                  "  sudo apt install xdotool\n\n"
+                  "Or type this in DOSBox manually:", xalign=0), False, False, 0)
+        entry = Gtk.Entry()
+        entry.set_text(cmd)
+        entry.set_editable(False)
+        entry.select_region(0, -1)
+        box.pack_start(entry, False, False, 0)
+        dlg.show_all()
+        dlg.run()
+        dlg.destroy()
+
+    def _on_window_destroy(self, _win):
+        save_machines(self._machines)
+        if self._overlay:
+            self._overlay.destroy()
+            self._overlay = None
+        if self._dosbox_proc and self._dosbox_proc.poll() is None:
+            self._dosbox_proc.terminate()
+            try:
+                self._dosbox_proc.wait(timeout=3)
+            except Exception:
+                self._dosbox_proc.kill()
+        Gtk.main_quit()
+
+    def _show_error(self, msg):
+        dlg = Gtk.MessageDialog(parent=self, flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK, text=msg)
+        dlg.run(); dlg.destroy()
+
+    def _show_info(self, msg):
+        dlg = Gtk.MessageDialog(parent=self, flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK, text=msg)
+        dlg.run(); dlg.destroy()
+
+    def _show_swap_hint(self, letter, path, cmd):
+        dlg = Gtk.Dialog(title=f"Swap Drive {letter}:", transient_for=self, flags=0)
+        dlg.set_default_size(500, 180)
+        dlg.add_button("OK", Gtk.ResponseType.OK)
+        box = dlg.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_top(12); box.set_margin_bottom(12)
+        box.set_margin_start(12); box.set_margin_end(12)
+        box.pack_start(Gtk.Label(
+            label=f"💾 {os.path.basename(path)} → Drive {letter}:\n\n"
+                  f"When the DOS installer asks for the next disk,\n"
+                  f"switch to the DOSBox window and type:",
+            xalign=0), False, False, 0)
+        # Copyable command entry
+        entry = Gtk.Entry()
+        entry.set_text(cmd)
+        entry.set_editable(False)
+        entry.select_region(0, -1)
+        box.pack_start(entry, False, False, 0)
+        box.pack_start(Gtk.Label(
+            label="(Select all and copy with Ctrl+C)", xalign=0),
+            False, False, 0)
+        dlg.show_all()
+        dlg.run()
+        dlg.destroy()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Application entry point
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    win = MainWindow(None)
+    win.show_all()
+    Gtk.main()

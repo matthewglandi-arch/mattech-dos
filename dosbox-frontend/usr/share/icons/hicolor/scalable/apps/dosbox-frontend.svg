@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Floppy disk body -->
+  <rect x="8" y="6" width="48" height="52" rx="4" ry="4" fill="#2c2c2c"/>
+  <!-- Label area -->
+  <rect x="14" y="22" width="36" height="28" rx="2" ry="2" fill="#e8e8e8"/>
+  <!-- Label lines -->
+  <line x1="18" y1="30" x2="46" y2="30" stroke="#aaa" stroke-width="2"/>
+  <line x1="18" y1="36" x2="46" y2="36" stroke="#aaa" stroke-width="2"/>
+  <line x1="18" y1="42" x2="38" y2="42" stroke="#aaa" stroke-width="2"/>
+  <!-- Shutter slot -->
+  <rect x="20" y="8" width="24" height="10" rx="1" ry="1" fill="#555"/>
+  <!-- Metal hub -->
+  <rect x="26" y="9" width="12" height="8" rx="1" ry="1" fill="#bbb"/>
+  <!-- Write-protect notch -->
+  <rect x="8" y="48" width="6" height="6" rx="1" ry="1" fill="#444"/>
+  <!-- Blue accent dot -->
+  <circle cx="48" cy="12" r="4" fill="#0078d7"/>
+</svg>

@@ -1,0 +1,59 @@
+# ── Debian packages ──────────────────────────────────────────────────────────
+*.deb
+
+# ── Downloaded VM media (large binary files) ─────────────────────────────────
+*.iso
+*.img
+*.ima
+*.vfd
+*.flp
+*.qcow2
+*.vmdk
+*.zip
+
+# ── QEMU runtime files ────────────────────────────────────────────────────────
+*.sock
+*.conf
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── VB.NET / Visual Studio build output ──────────────────────────────────────
+DOSBoxFrontend/bin/
+DOSBoxFrontend/obj/
+DOSBoxFrontend/My Project/Settings.Designer.vb
+DOSBoxFrontend/My Project/Resources.Designer.vb
+DOSBoxFrontend/My Project/Application.Designer.vb
+*.user
+*.suo
+.vs/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+
+# ── Temp / scripts ────────────────────────────────────────────────────────────
+extract_mouse.py
+make_icon.py
+copy_icons.sh
+build_deb.sh
+build_mattech.sh
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/settings.json
+.vscode/launch.json
+
+# ── Website .deb copy (keep index.html but not the binary) ───────────────────
+website/*.deb

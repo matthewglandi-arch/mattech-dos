@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+chmod +x /usr/bin/dosbox-frontend
+update-desktop-database -q /usr/share/applications || true
+exit 0

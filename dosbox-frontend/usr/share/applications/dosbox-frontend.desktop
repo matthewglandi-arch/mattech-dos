@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=DOSBox Frontend
+GenericName=DOS Emulator Frontend
+Comment=Manage and launch DOSBox with easy floppy disk image support
+Exec=dosbox-frontend
+Icon=dosbox-frontend
+Terminal=false
+Categories=Emulator;Game;
+Keywords=dos;dosbox;floppy;emulator;retro;
+StartupNotify=true
+StartupWMClass=dosbox-frontend

@@ -1,0 +1,14 @@
+Package: mattech-dos
+Version: 1.0.0
+Section: games
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.8), python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, qemu-system-x86, qemu-utils, xdotool
+Maintainer: MatTech <user@example.com>
+Description: MatTech DOS – VirtualBox-style DOSBox frontend
+ A VirtualBox-style GTK3 frontend for DOSBox. Features:
+  - Left sidebar machine list, right detail panel (like VirtualBox)
+  - DOS version picker with auto-detected CPU/RAM/disk requirements
+  - Auto-download of install media from archive.org
+  - Insert Floppy / Insert CD-ROM toolbar per drive letter
+  - Supports MS-DOS 5/6, Windows 3.11, 95, 98, FreeDOS, PC-DOS
