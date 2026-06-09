@@ -171,12 +171,20 @@ DOS_DB = {
              "url": "https://archive.org/download/ibm-dos-3.30-floppy-disks/IBM%20DOS%203.30%20360K%20Disks%20-%20Disk%2001.img"},
             {"label": "DOS 3.30 Disk 2",        "file": "win20_dos2.img",
              "url": "https://archive.org/download/ibm-dos-3.30-floppy-disks/IBM%20DOS%203.30%20360K%20Disks%20-%20Disk%2002.img"},
-            {"label": "Win 2.0 All Disks (zip)", "file": "win20_all.zip",
-             "url": "https://archive.org/download/microsoft-windows-v2.0/Microsoft%20-%20Windows%20v2.0%20%281987%29.zip"},
+            {"label": "Win 2.03 Disk 1", "file": "win20_disk1.img",
+             "url": "https://archive.org/download/microsoft-windows-2.03-3.5-720k/Microsoft%20Windows%202.03%20%283.5-720k%29/disk1.img"},
+            {"label": "Win 2.03 Disk 2", "file": "win20_disk2.img",
+             "url": "https://archive.org/download/microsoft-windows-2.03-3.5-720k/Microsoft%20Windows%202.03%20%283.5-720k%29/disk2.img"},
+            {"label": "Win 2.03 Disk 3", "file": "win20_disk3.img",
+             "url": "https://archive.org/download/microsoft-windows-2.03-3.5-720k/Microsoft%20Windows%202.03%20%283.5-720k%29/disk3.img"},
+            {"label": "Win 2.03 Disk 4", "file": "win20_disk4.img",
+             "url": "https://archive.org/download/microsoft-windows-2.03-3.5-720k/Microsoft%20Windows%202.03%20%283.5-720k%29/disk4.img"},
+            {"label": "Win 2.03 Disk 5", "file": "win20_disk5.img",
+             "url": "https://archive.org/download/microsoft-windows-2.03-3.5-720k/Microsoft%20Windows%202.03%20%283.5-720k%29/disk5.img"},
         ],
         "boot_disk": "win20_dos1.img",
-        "archive_id": "microsoft-windows-v2.0",
-        "description": "Windows 2.0 (1987). Boots DOS 3.30, then extract win20_all.zip and run SETUP.EXE.",
+        "archive_id": "microsoft-windows-2.03-3.5-720k",
+        "description": "Windows 2.03 (1987). Boots DOS 3.30, then run SETUP from Win 2.03 Disk 1.",
     },
     "win30": {
         "name": "Windows 3.0",
@@ -355,10 +363,11 @@ DOS_DB = {
             {"letter": "D", "type": "cdrom",  "label": "CD-ROM"},
         ],
         "disks": [
-            {"label": "Install CD (zip)", "file": "FD13-LiteUSB.zip",
-             "url": "https://archive.org/download/freedos-1.3/FD13-LiteUSB.zip"},
+            {"label": "Install CD", "file": "freedos13.iso",
+             "url": "https://archive.org/download/freedos-1.3/FD13CD.iso",
+             "min_size_mb": 50},
         ],
-        "boot_cdrom": "FD13-LiteUSB.zip",
+        "boot_cdrom": "freedos13.iso",
         "archive_id": "freedos-1.3",
         "description": "FreeDOS 1.3 – free, open-source DOS. Fully legal to download.",
     },
@@ -505,8 +514,8 @@ def get_qemu_args(machine):
         "-machine", "pc",
         # HDD as primary IDE master (ide bus 0, unit 0)
         "-drive",   f"file={hdd_path},format=qcow2,if=ide,index=0,media=disk",
-        # Display — close-to-hide so closing window goes through our handler
-        "-display", "gtk,window-close=off",
+        # Display — grab mouse on hover so it works without clicking first
+        "-display", "gtk,window-close=off,grab-on-hover=on",
         # Monitor socket
         "-monitor", f"unix:{monitor_sock},server,nowait",
         "-nodefaults",
@@ -514,8 +523,9 @@ def get_qemu_args(machine):
         # Serial mouse on COM1 — works with Windows 1.0/2.0/3.x
         "-device", "isa-serial,chardev=mouse",
         "-chardev", "msmouse,id=mouse",
-        # USB tablet for modern OSes (Win95+)
-        "-device", "usb-ehci",
+        # USB tablet for modern OSes (Win95+) — -usb enables the UHCI controller
+        # that usb-tablet attaches to, giving absolute mouse positioning
+        "-usb",
         "-device", "usb-tablet",
     ]
 
