@@ -1600,6 +1600,7 @@ class MainWindow(Gtk.Window):
             ("Settings…",         self._on_machine_settings),
             None,
             ("Start / Resume",    self._on_start),
+            ("Boot from Hard Disk", self._on_start_hdd),
             ("Shutdown",          self._on_shutdown),
             ("Force Stop",        self._on_stop),
             None,
@@ -1821,6 +1822,11 @@ class MainWindow(Gtk.Window):
         self._hdr_start_btn.get_style_context().add_class("suggested-action")
         self._hdr_start_btn.connect("clicked", self._on_start)
         hdr.pack_end(self._hdr_start_btn, False, False, 0)
+
+        hdr_hdd_btn = Gtk.Button(label="💽  Boot HDD")
+        hdr_hdd_btn.set_tooltip_text("Boot directly from hard disk (skip floppy)")
+        hdr_hdd_btn.connect("clicked", self._on_start_hdd)
+        hdr.pack_end(hdr_hdd_btn, False, False, 4)
         self._detail_box.pack_start(hdr, False, False, 0)
         self._detail_box.pack_start(Gtk.Separator(), False, False, 0)
 
@@ -2145,6 +2151,53 @@ class MainWindow(Gtk.Window):
         except Exception as ex:
             self._show_error(f"Failed to start QEMU:\n{ex}")
 
+    def _on_start_hdd(self, _btn=None):
+        if not self._selected:
+            self._show_error("Select a machine first.")
+            return
+        if not shutil.which("qemu-system-i386") and not shutil.which("qemu-system-x86_64"):
+            self._show_error("QEMU not found.\nInstall: sudo apt install qemu-system-x86")
+            return
+        try:
+            args, hdd_path, monitor_sock = get_qemu_args(self._selected)
+            # Override boot order to HDD only — remove any floppy boot flag
+            args = [a for a in args if not a.startswith("order=")]
+            # Replace boot order arg
+            for i, a in enumerate(args):
+                if a == "-boot":
+                    args[i+1] = "order=c"
+                    break
+            else:
+                args += ["-boot", "order=c"]
+            # Remove floppy drive from args so it doesn't interfere
+            new_args = []
+            skip_next = False
+            for i, a in enumerate(args):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if a == "-drive" and i+1 < len(args) and "floppy" in args[i+1]:
+                    skip_next = True
+                    continue
+                new_args.append(a)
+            args = new_args
+            self._monitor_sock = monitor_sock
+            save_machines(self._machines)
+            log(f"Boot HDD: {' '.join(args)}")
+            self._dosbox_proc = subprocess.Popen(args)
+            self._set_status(f"Booting from HDD: {self._selected['name']}")
+            self._media_bar.show()
+            self._rebuild_drive_buttons()
+            if self._hdr_start_btn:
+                self._hdr_start_btn.set_label("⏻  Shutdown")
+                self._hdr_start_btn.get_style_context().remove_class("suggested-action")
+                self._hdr_start_btn.get_style_context().add_class("destructive-action")
+                self._hdr_start_btn.disconnect_by_func(self._on_start)
+                self._hdr_start_btn.connect("clicked", self._on_shutdown)
+            GLib.timeout_add(2000, self._show_overlay)
+        except Exception as ex:
+            self._show_error(f"Failed to start QEMU:\n{ex}")
+
     def _on_shutdown(self, _btn=None):
         """Send ACPI shutdown via QEMU monitor."""
         if not self._dosbox_proc or self._dosbox_proc.poll() is not None:
@@ -2245,56 +2298,10 @@ class MainWindow(Gtk.Window):
             path = results.get(disk["file"])
             if path:
                 machine.setdefault("media_files", {})[disk["file"]] = path
-        # Post-process: extract mouse driver floppy from zip if present
-        mouse_zip = media_dir / "mouse_driver.zip"
-        mouse_floppy = media_dir / "mouse_driver.img"
-        if mouse_zip.exists():
-            # Re-extract if missing or too small (failed previous attempt)
-            if not mouse_floppy.exists() or mouse_floppy.stat().st_size < 100_000:
-                self._extract_mouse_driver(mouse_zip, mouse_floppy, machine)
         save_machines(self._machines)
         if self._selected and self._selected["id"] == machine["id"]:
             self._build_machine_detail(machine)
         self._set_status("Download complete.")
-
-    def _extract_mouse_driver(self, zip_path, floppy_path, machine):
-        """Extract mouse driver floppy image from zip."""
-        import zipfile
-        try:
-            with zipfile.ZipFile(zip_path) as z:
-                # Look for the setup floppy image
-                target = None
-                for name in z.namelist():
-                    n = name.upper()
-                    if n.endswith(".IMG") and "SETUP" in n:
-                        target = name
-                        break
-                # Fallback: any .img file
-                if not target:
-                    for name in z.namelist():
-                        if name.upper().endswith(".IMG"):
-                            target = name
-                            break
-                if not target:
-                    log("No .img found in mouse driver zip")
-                    return
-                log(f"Extracting mouse driver: {target}")
-                data = z.read(target)
-                with open(floppy_path, "wb") as f:
-                    f.write(data)
-                log(f"Mouse driver floppy extracted: {floppy_path} ({len(data)} bytes)")
-
-            # Add to machine's extra disks
-            machine.setdefault("extra_disks", [])
-            if not any(d["file"] == "mouse_driver.img"
-                       for d in machine["extra_disks"]):
-                machine["extra_disks"].append(
-                    {"label": "Mouse Driver Setup", "file": "mouse_driver.img", "url": ""})
-            save_machines(self._machines)
-        except Exception as ex:
-            log(f"Mouse driver extraction failed: {ex}")
-            import traceback
-            log(traceback.format_exc())
 
     def _on_insert_drive(self, letter, drive_type=None):
         if not self._selected:
