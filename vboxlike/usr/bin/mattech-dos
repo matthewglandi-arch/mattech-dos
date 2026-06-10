@@ -2152,6 +2152,7 @@ class MainWindow(Gtk.Window):
             self._show_error(f"Failed to start QEMU:\n{ex}")
 
     def _on_start_hdd(self, _btn=None):
+        """Boot directly from the hard disk, ignoring floppy/CD boot order."""
         if not self._selected:
             self._show_error("Select a machine first.")
             return
@@ -2160,27 +2161,24 @@ class MainWindow(Gtk.Window):
             return
         try:
             args, hdd_path, monitor_sock = get_qemu_args(self._selected)
-            # Override boot order to HDD only — remove any floppy boot flag
-            args = [a for a in args if not a.startswith("order=")]
-            # Replace boot order arg
-            for i, a in enumerate(args):
-                if a == "-boot":
-                    args[i+1] = "order=c"
-                    break
-            else:
-                args += ["-boot", "order=c"]
-            # Remove floppy drive from args so it doesn't interfere
+
+            # Remove all -boot args and floppy drives, then add -boot order=c
             new_args = []
             skip_next = False
             for i, a in enumerate(args):
                 if skip_next:
                     skip_next = False
                     continue
+                if a == "-boot":
+                    skip_next = True  # skip the boot order value too
+                    continue
                 if a == "-drive" and i+1 < len(args) and "floppy" in args[i+1]:
                     skip_next = True
                     continue
                 new_args.append(a)
+            new_args += ["-boot", "order=c"]
             args = new_args
+
             self._monitor_sock = monitor_sock
             save_machines(self._machines)
             log(f"Boot HDD: {' '.join(args)}")
