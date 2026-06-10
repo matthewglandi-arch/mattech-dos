@@ -518,14 +518,11 @@ def get_qemu_args(machine):
         "-display", "gtk,window-close=off,grab-on-hover=on",
         # Monitor socket
         "-monitor", f"unix:{monitor_sock},server,nowait",
-        "-nodefaults",
         "-vga", "cirrus",
-        # PS/2 mouse — works on Win95/98/NT/2000/XP with no extra drivers
-        "-device", "i8042",
         # Serial mouse on COM1 — works with Windows 1.0/2.0/3.x
         "-device", "isa-serial,chardev=mouse",
         "-chardev", "msmouse,id=mouse",
-        # USB tablet for OSes with USB HID support (Win98 SE+, XP, 2000)
+        # USB tablet — absolute mouse positioning, works Win95+ (UHCI built into -machine pc)
         "-usb",
         "-device", "usb-tablet",
     ]
